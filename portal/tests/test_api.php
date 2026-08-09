@@ -65,6 +65,17 @@ function api(string $method, string $path, $body = null): array {
     return [$status, json_decode((string)$response, true)];
 }
 
+/** Eine Seite des lesenden Front-Controllers, als Rohtext. */
+function page(string $path): array {
+    global $port;
+    $ch = curl_init("http://127.0.0.1:$port/index.php?path=" . rawurlencode($path));
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
+    $html = (string)curl_exec($ch);
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return [$status, $html];
+}
+
 // Warten, bis der Server antwortet -- eine feste Pause ist auf einer
 // beschaeftigten Maschine mal zu kurz und sonst immer zu lang.
 for ($try = 0; $try < 100; $try++) {
@@ -124,9 +135,54 @@ assert_equals(405, $status, 'GET auf reports wird abgelehnt');
 [$status] = api('POST', 'unbekannt', []);
 assert_equals(404, $status, 'Unbekannter Pfad antwortet 404');
 
+// --- Devisenkurse ----------------------------------------------------------
+
+[$status, $body] = api('POST', 'fx', [['2026-08-08', 1.0850], ['2026-08-09', 1.0900]]);
+assert_equals(200, $status, 'Devisenkurse werden angenommen');
+assert_equals(2, $body['written'], 'Zwei Kurse geschrieben');
+
+[$status, $body] = api('POST', 'fx', [['2026-08-09', 109.0]]);
+assert_equals(422, $status, 'Kurs in der falschen Notierung wird abgelehnt');
+assert_that(str_contains(implode(' ', $body['details']), 'Notierung'),
+    'Fehlerdetails nennen die Notierung');
+
+[$status, $body] = api('GET', 'health');
+assert_equals(2, $body['fx'], 'health zaehlt die Devisenkurse');
+
+// --- Die gerenderten Seiten ------------------------------------------------
+//
+// Der lesende Teil hat sonst keinen Test. Eine Seite, die an einem fehlenden
+// Kurs in einen Fatal laeuft, faellt in den Repository-Tests nicht auf --
+// hier schon, weil hier der ganze Weg bis zum HTML laeuft.
+
+[$status, $html] = page('r/2026-08-09');
+assert_equals(200, $status, 'Die Reportseite rendert');
+assert_that(str_contains($html, 'EUR/USD 1,0900'),
+    'Die Reportseite nennt den Kurs, mit dem sie rechnet');
+assert_that(substr_count($html, '€') >= 3,
+    'Die Reportseite zeigt EUR-Betraege neben den USD-Niveaus');
+assert_that(str_contains($html, '39,27 €'),
+    'Der Entry von 42,80 USD steht als 39,27 EUR');
+
+[$status, $html] = page('r/2026-08-09/XYZ');
+assert_equals(200, $status, 'Die Detailseite rendert');
+assert_that(str_contains($html, '39,27 €'), 'Auch der Handelsplan rechnet den Entry um');
+assert_that(str_contains($html, '10.000 €'), 'Das Konto ist als EUR ausgewiesen');
+
+// Ein Report vor dem ersten bekannten Kurs zeigt nur USD -- und faellt nicht um.
+$older = fixture_document();
+$older['date'] = '2026-07-01';
+[$status] = api('POST', 'reports', $older);
+assert_equals(200, $status, 'Report ohne passenden Devisenkurs wird angenommen');
+
+[$status, $html] = page('r/2026-07-01');
+assert_equals(200, $status, 'Auch ohne Devisenkurs rendert die Reportseite');
+assert_that(str_contains($html, 'Kein EUR/USD-Kurs'), 'Und sagt, warum der Euro fehlt');
+assert_that(!str_contains($html, '€'), 'Ohne Kurs steht nirgends ein Eurobetrag');
+
 // Jeder Push steht im Protokoll, die abgelehnten eingeschlossen.
 [$status, $body] = api('GET', 'health');
-assert_equals(1, $body['reports'], 'Nach den Pushes steht genau ein Report in der Datenbank');
+assert_equals(2, $body['reports'], 'Nach den Pushes stehen zwei Reports in der Datenbank');
 assert_that(!empty($body['last_push']), 'health meldet den letzten Push');
 
 exit(test_summary());

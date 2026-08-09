@@ -63,6 +63,17 @@ const MIGRATIONS = [
             detail    TEXT
         );
         SQL,
+
+    // Die Pipeline rechnet in USD, gehandelt wird in EUR. Der Tageskurs
+    // (USD je EUR, yfinance EURUSD=X) kommt mit jedem Push mit; das Portal
+    // rechnet damit nur die Anzeige um. Kein Kurs heisst: keine EUR-Zahl --
+    // lieber ein Gedankenstrich als eine mit 1,00 gerechnete Order.
+    2 => <<<'SQL'
+        CREATE TABLE fx (
+            date TEXT PRIMARY KEY,
+            rate REAL NOT NULL
+        );
+        SQL,
 ];
 
 function migrate(PDO $pdo): int {

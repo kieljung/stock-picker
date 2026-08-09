@@ -7,10 +7,16 @@
  * Jedes Feld stammt mittelbar aus einem Sprachmodell und geht deshalb
  * entweder durch md() (Prosa) oder durch e() (alles andere). Zahlen laufen
  * durch money(), damit Komma und Tausenderpunkt ueberall gleich aussehen.
+ *
+ * Die Niveaus stehen in USD -- so kommen sie aus der Pipeline und so stehen
+ * sie im Chart. Darunter der EUR-Betrag zum Devisenkurs des Reporttages: die
+ * Zahl fuer das Orderfenster eines Euro-Brokers.
  */
 
 $date      = (string)$report['date'];
 $picks     = $report['picks'] ?? [];
+$rate      = $report['fx']['rate'] ?? null;
+$fx_date   = $report['fx']['date'] ?? null;
 $rejected  = array_values($report['rejected'] ?? []);
 $checklist = array_values($report['checklist'] ?? []);
 
@@ -84,7 +90,7 @@ $scores = [
           <th scope="col" class="<?= $cell ?> text-right">Composite</th>
           <th scope="col" class="<?= $cell ?> text-right">Entry</th>
           <th scope="col" class="<?= $cell ?> text-right">Stop</th>
-          <th scope="col" class="<?= $cell ?> text-right">Target 1</th>
+          <th scope="col" class="<?= $cell ?> text-right">Target&nbsp;1</th>
           <th scope="col" class="<?= $cell ?> text-right">R:R</th>
           <th scope="col" class="<?= $cell ?>">Status</th>
           <th scope="col" class="<?= $cell ?>">Katalysator</th>
@@ -103,9 +109,15 @@ $scores = [
           <td class="<?= $cell ?> text-right font-medium text-gray-900 dark:text-white">
             <?= (int)$pick['composite'] ?>
           </td>
-          <td class="<?= $cell ?> text-right"><?= e(money($pick['entry'])) ?></td>
-          <td class="<?= $cell ?> text-right"><?= e(money($pick['stop'])) ?></td>
-          <td class="<?= $cell ?> text-right"><?= e(money($pick['target1'])) ?></td>
+<?php foreach (['entry', 'stop', 'target1'] as $level): ?>
+<?php $level_eur = to_eur(is_numeric($pick[$level]) ? (float)$pick[$level] : null, $rate); ?>
+          <td class="<?= $cell ?> text-right">
+            <?= e(usd(is_numeric($pick[$level]) ? (float)$pick[$level] : null)) ?>
+<?php if ($level_eur !== null): ?>
+            <span class="block text-xs text-gray-500 dark:text-gray-400"><?= e(eur($level_eur)) ?></span>
+<?php endif; ?>
+          </td>
+<?php endforeach; ?>
           <td class="<?= $cell ?> text-right"><?= e(money($pick['risk_reward'])) ?></td>
           <td class="<?= $cell ?>"><?= status_badge($pick['status'] ?? null) ?></td>
           <td class="px-4 py-3 max-w-xs truncate" title="<?= e($pick['catalyst']) ?>">
@@ -116,6 +128,16 @@ $scores = [
       </tbody>
     </table>
   </div>
+<?php if ($rate !== null): ?>
+  <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+    EUR-Beträge zu EUR/USD <?= e(money($rate, 4)) ?> vom <?= e((string)$fx_date) ?>.
+    Gerechnet wird in USD; der Euro steht nur für die Order daneben.
+  </p>
+<?php else: ?>
+  <p class="mt-2 text-xs text-amber-700 dark:text-amber-400">
+    Kein EUR/USD-Kurs für diesen Tag im Portal — die Niveaus stehen nur in USD.
+  </p>
+<?php endif; ?>
 </section>
 
 <section class="mb-8 space-y-4">
@@ -193,19 +215,31 @@ $scores = [
 
     <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-gray-200 pt-4 text-sm sm:grid-cols-6 dark:border-gray-700">
 <?php
+      // [Anzeige, Zweitzeile]. Die Zweitzeile traegt den EUR-Betrag; wo
+      // keiner sinnvoll ist -- R:R ist ein Verhaeltnis, Stueck eine Anzahl --
+      // bleibt sie leer.
+      $price = fn(string $key): array => [
+          usd(is_numeric($pick[$key]) ? (float)$pick[$key] : null),
+          ($v = to_eur(is_numeric($pick[$key]) ? (float)$pick[$key] : null, $rate)) === null
+              ? '' : eur($v),
+      ];
       $levels = [
-          'Entry'     => money($pick['entry']),
-          'Stop'      => money($pick['stop']),
-          'Target 1'  => money($pick['target1']),
-          'Target 2'  => money($pick['target2']),
-          'R:R'       => money($pick['risk_reward']),
-          'Stück'     => $pick['position_size'] === null ? '—' : money((float)$pick['position_size'], 0),
+          'Entry'     => $price('entry'),
+          'Stop'      => $price('stop'),
+          'Target 1'  => $price('target1'),
+          'Target 2'  => $price('target2'),
+          'R:R'       => [money($pick['risk_reward']), ''],
+          'Stück'     => [$pick['position_size'] === null
+                              ? '—' : money((float)$pick['position_size'], 0), ''],
       ];
 ?>
-<?php foreach ($levels as $label => $value): ?>
+<?php foreach ($levels as $label => [$value, $second]): ?>
       <div>
         <dt class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400"><?= e($label) ?></dt>
         <dd class="font-medium text-gray-900 dark:text-white"><?= e($value) ?></dd>
+<?php if ($second !== ''): ?>
+        <dd class="text-xs text-gray-500 dark:text-gray-400"><?= e($second) ?></dd>
+<?php endif; ?>
       </div>
 <?php endforeach; ?>
     </dl>

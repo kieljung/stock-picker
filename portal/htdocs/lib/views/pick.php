@@ -2,7 +2,12 @@
 /**
  * Pick-Detail: links Chart, R-Leiter, Scores, Kennzahlen und Handelsplan,
  * rechts die Begruendungen. Erwartet $pick (aus get_pick(), also inklusive
- * $pick['bars'] und mit gerechnetem risk_reward/position_size) und $account.
+ * $pick['bars'], $pick['fx'] und mit gerechnetem risk_reward/position_size)
+ * und $account.
+ *
+ * Chart, Leiter und Kennzahlen stehen in USD -- das sind die Kurse, auf denen
+ * die Auswahl beruht. Der Handelsplan traegt zusaetzlich den EUR-Betrag: das
+ * ist die Zahl, die im Orderfenster eines Euro-Brokers steht.
  *
  * Jedes Feld aus der Datenbank stammt mittelbar aus einem Sprachmodell und
  * laeuft deshalb durch e() oder md() -- ohne Ausnahme.
@@ -82,6 +87,11 @@ $plan      = is_array($pick['plan'] ?? null) ? $pick['plan'] : [];
 $sources   = is_array($pick['sources'] ?? null) ? $pick['sources'] : [];
 $bars      = is_array($pick['bars'] ?? null) ? $pick['bars'] : [];
 $rules     = TEMPLATE_THRESHOLDS[(string)$pick['setup']] ?? [];
+
+// Der Devisenkurs des Reporttages, nicht der von heute: die EUR-Niveaus
+// eines abgeschlossenen Trades duerfen sich nachtraeglich nicht mehr aendern.
+$rate    = $pick['fx']['rate'] ?? null;
+$fx_date = $pick['fx']['date'] ?? null;
 
 $entry = is_numeric($pick['entry'] ?? null) ? (float)$pick['entry'] : null;
 $stop  = is_numeric($pick['stop'] ?? null) ? (float)$pick['stop'] : null;
@@ -197,18 +207,34 @@ $chart_data = json_encode([
 
 <?php if ($ladder): ?>
       <div class="shrink-0">
-        <div class="relative h-[420px] w-20">
+        <!-- data-chart-ladder verweist auf die id des Charts. chart.js setzt
+             die Sprossen danach auf die Koordinaten der Preisskala um; die
+             Prozentwerte hier sind nur der Stand ohne JavaScript. -->
+        <div class="relative h-[420px] w-24" data-chart-ladder="chart">
 <?php foreach ($ladder as $rung): ?>
-          <div class="absolute inset-x-0" style="bottom: <?= number_format($rung['pos'], 2, '.', '') ?>%">
-            <div class="text-[10px] leading-tight <?= $rung['text'] ?>"><?= e($rung['label']) ?></div>
-            <div class="text-[10px] leading-tight text-gray-500 dark:text-gray-400"><?= money($rung['price']) ?></div>
+          <!-- Beschriftung einzeilig: auf der Skala des Charts liegen Entry,
+               letzter Kurs und Stop dicht beieinander, und zwei Textzeilen je
+               Sprosse ueberlagern sich dort. -->
+          <div class="absolute inset-x-0"
+               data-price="<?= number_format($rung['price'], 4, '.', '') ?>"
+               style="bottom: <?= number_format($rung['pos'], 2, '.', '') ?>%">
+            <div data-rung-label class="flex items-baseline justify-between gap-1 text-[10px] leading-tight">
+              <span class="<?= $rung['text'] ?>"><?= e($rung['label']) ?></span>
+              <span class="text-gray-500 dark:text-gray-400"><?= usd($rung['price']) ?></span>
+            </div>
             <div class="h-0.5 w-full <?= $rung['bar'] ?>"></div>
           </div>
 <?php endforeach; ?>
 <?php if ($r_pos !== null): ?>
-          <div class="absolute inset-x-0" style="bottom: <?= number_format($r_pos, 2, '.', '') ?>%">
-            <div class="text-[10px] leading-tight font-semibold text-gray-900 dark:text-white">
-              <?= $r_now === null ? '—' : money($r_now, 2) . ' R' ?>
+          <!-- Vorrang vor den festen Niveaus: die R-Zahl ist das Einzige, was
+               die Leiter zeigt und der Chart nicht -- Entry, Stop und die
+               Targets stehen dort ohnehin an der Preisachse. -->
+          <div class="absolute inset-x-0" data-rung-priority="2"
+               data-price="<?= number_format((float)$last_close, 4, '.', '') ?>"
+               style="bottom: <?= number_format($r_pos, 2, '.', '') ?>%">
+            <div data-rung-label class="flex items-baseline justify-between gap-1 text-[10px] leading-tight font-semibold text-gray-900 dark:text-white">
+              <span>Kurs</span>
+              <span><?= $r_now === null ? '—' : money($r_now, 2) . ' R' ?></span>
             </div>
             <div class="h-px w-full bg-gray-900 dark:bg-white"></div>
           </div>
@@ -297,6 +323,10 @@ $chart_data = json_encode([
 
     <section class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700">
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Handelsplan</h2>
+      <!-- Die Order laeuft in EUR. Der Betrag steht klein unter dem USD-Wert,
+           nicht an seiner Stelle: Chart, Leiter und Kennzahlen daneben sind
+           USD, und zwei Massstaebe ohne Kennzeichnung waeren die teurere
+           Verwechslung. -->
       <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
 <?php foreach ([
         ['Entry',    $entry, $plan['entry'] ?? ''],
@@ -306,7 +336,11 @@ $chart_data = json_encode([
       ] as [$label, $price, $note]): ?>
         <div>
           <dt class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400"><?= e($label) ?></dt>
-          <dd class="font-semibold text-gray-900 dark:text-white"><?= money($price === null ? null : (float)$price) ?></dd>
+          <dd class="font-semibold text-gray-900 dark:text-white"><?= usd($price === null ? null : (float)$price) ?></dd>
+<?php $in_eur = to_eur($price === null ? null : (float)$price, $rate); ?>
+<?php if ($in_eur !== null): ?>
+          <dd class="text-xs text-gray-600 dark:text-gray-400">≈ <?= eur($in_eur) ?></dd>
+<?php endif; ?>
 <?php if (trim((string)$note) !== ''): ?>
           <dd class="text-gray-600 dark:text-gray-400"><?= e((string)$note) ?></dd>
 <?php endif; ?>
@@ -320,13 +354,32 @@ $chart_data = json_encode([
         </div>
         <div>
           <dt class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Position bei <?= money(ACCOUNT_RISK_PCT, 0) ?> % von <?= money($account, 0) ?>
+            Position bei <?= money(ACCOUNT_RISK_PCT, 0) ?> % von <?= eur($account, 0) ?>
           </dt>
           <dd class="font-semibold text-gray-900 dark:text-white">
             <?= $pick['position_size'] === null ? '—' : money((float)$pick['position_size'], 0) . ' Stück' ?>
           </dd>
+<?php if ($pick['position_size'] !== null && $entry !== null && $stop !== null): ?>
+          <dd class="text-xs text-gray-600 dark:text-gray-400">
+            Risiko <?= eur(to_eur(($entry - $stop) * (int)$pick['position_size'], $rate)) ?>
+          </dd>
+<?php endif; ?>
         </div>
       </dl>
+<?php if ($rate !== null): ?>
+      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+        Umgerechnet mit EUR/USD <?= money($rate, 4) ?> vom <?= e((string)$fx_date) ?>.
+        Ein Broker rechnet zum Kurs der Ausführung ab und nimmt eine Marge —
+        die EUR-Beträge sind Orientierung, keine Abrechnung.
+      </p>
+<?php else: ?>
+      <p class="mt-3 text-xs text-amber-700 dark:text-amber-400">
+        Kein EUR/USD-Kurs im Portal — die Niveaus stehen nur in USD und die
+        Stückzahl bleibt leer. Der nächste
+        <code class="rounded bg-gray-100 px-1 dark:bg-gray-700">publish.py --sync</code>
+        liefert den Kurs nach.
+      </p>
+<?php endif; ?>
     </section>
 
   </div>

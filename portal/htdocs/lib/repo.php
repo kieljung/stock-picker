@@ -74,6 +74,7 @@ function save_report(PDO $pdo, array $doc): array {
         }
 
         $bars = save_bars($pdo, $doc['bars'] ?? [], false);
+        $fx   = save_fx($pdo, $doc['fx'] ?? [], false);
         $pdo->commit();
     } catch (Throwable $exc) {
         $pdo->rollBack();
@@ -81,7 +82,7 @@ function save_report(PDO $pdo, array $doc): array {
     }
 
     return ['date' => $date, 'picks' => count($picks),
-            'bars_written' => $bars, 'replaced' => $replaced];
+            'bars_written' => $bars, 'fx_written' => $fx, 'replaced' => $replaced];
 }
 
 function save_bars(PDO $pdo, array $bars, bool $own_transaction = true): int {
@@ -103,6 +104,37 @@ function save_bars(PDO $pdo, array $bars, bool $own_transaction = true): int {
             $stmt->execute([$ticker, $row[0], $row[1], $row[2], $row[3], $row[4], $row[5]]);
             $written++;
         }
+    }
+    if ($own_transaction) {
+        $pdo->commit();
+    }
+    return $written;
+}
+
+/**
+ * EUR/USD-Tageskurse, idempotent wie die Bars.
+ *
+ * Erwartet [[datum, kurs], ...] mit dem Kurs als USD je EUR -- die Notierung
+ * aus stockpicker/fx.py. Ein spaeterer Push darf einen Tag korrigieren:
+ * yfinance liefert den Schlusskurs des laufenden Tages vorlaeufig.
+ */
+function save_fx(PDO $pdo, array $rows, bool $own_transaction = true): int {
+    if (!$rows) {
+        return 0;
+    }
+    if ($own_transaction) {
+        $pdo->beginTransaction();
+    }
+    $stmt = $pdo->prepare(
+        'INSERT INTO fx (date, rate) VALUES (?, ?)
+         ON CONFLICT(date) DO UPDATE SET rate = excluded.rate');
+    $written = 0;
+    foreach ($rows as $row) {
+        if (!is_array($row) || count($row) < 2 || !is_numeric($row[1])) {
+            continue;
+        }
+        $stmt->execute([(string)$row[0], (float)$row[1]]);
+        $written++;
     }
     if ($own_transaction) {
         $pdo->commit();
@@ -152,6 +184,45 @@ const CATALYST_BUCKETS = [                        // outcomes.CATALYST_BUCKETS
 // Spiegel von TradeConfig.account_risk_pct in stockpicker/config.py.
 const ACCOUNT_RISK_PCT = 1.0;
 
+/**
+ * Der EUR/USD-Kurs, mit dem eine Seite rechnet: der juengste am oder vor
+ * $on. Ohne $on der zuletzt bekannte.
+ *
+ * Bewusst der Kurs des Reporttages und nicht der von heute: ein Report ist
+ * das Dokument seines Tages. Wuerde er mit dem Tageskurs gerechnet, aenderten
+ * sich die EUR-Niveaus eines abgeschlossenen Trades noch Monate spaeter.
+ *
+ * Gibt ['date' => …, 'rate' => …] zurueck oder null, wenn das Portal noch
+ * keinen Kurs kennt -- dann zeigen die Views nur USD.
+ */
+function fx_rate(PDO $pdo, ?string $on = null): ?array {
+    if ($on === null) {
+        $row = $pdo->query('SELECT date, rate FROM fx ORDER BY date DESC LIMIT 1')->fetch();
+    } else {
+        $stmt = $pdo->prepare(
+            'SELECT date, rate FROM fx WHERE date <= ? ORDER BY date DESC LIMIT 1');
+        $stmt->execute([$on]);
+        $row = $stmt->fetch();
+    }
+    if (!$row || !is_numeric($row['rate']) || (float)$row['rate'] <= 0) {
+        return null;
+    }
+    return ['date' => (string)$row['date'], 'rate' => (float)$row['rate']];
+}
+
+/**
+ * USD-Betrag in EUR. $rate ist USD je EUR.
+ *
+ * Ohne Kurs kommt null zurueck, nie der USD-Betrag: eine unumgerechnete Zahl
+ * mit einem Eurozeichen daneben waere die teuerste Art, hier zu scheitern.
+ */
+function to_eur(?float $usd, ?float $rate): ?float {
+    if ($usd === null || $rate === null || $rate <= 0) {
+        return null;
+    }
+    return $usd / $rate;
+}
+
 // Bars je Pick fuer die Miniatur-Charts der Reportseite.
 const MINI_CHART_BARS = 60;
 
@@ -164,8 +235,12 @@ const MINI_CHART_BARS = 60;
  * vermeidbare Fehlerquelle -- also wird gerechnet und der gespeicherte Wert
  * ueberschrieben. Die Kontogroesse kommt von aussen herein; repo.php kennt
  * config.php nicht.
+ *
+ * Das Konto steht in EUR, das Risiko je Stueck in USD. Ohne Devisenkurs
+ * bleibt die Stueckzahl deshalb leer: eine Position, die den Wechselkurs
+ * stillschweigend mit 1,00 ansetzt, ist bei EUR/USD 1,16 um 16 % zu gross.
  */
-function with_derived_levels(array $pick, float $account): array {
+function with_derived_levels(array $pick, float $account, ?float $rate = null): array {
     $entry = $pick['entry'] ?? null;
     $stop  = $pick['stop'] ?? null;
     $t1    = $pick['target1'] ?? null;
@@ -178,8 +253,11 @@ function with_derived_levels(array $pick, float $account): array {
         $pick['position_size'] = null;
         return $pick;
     }
-    $pick['risk_reward']   = round(((float)$t1 - (float)$entry) / $risk, 2);
-    $pick['position_size'] = (int)floor($account * ACCOUNT_RISK_PCT / 100.0 / $risk);
+    $pick['risk_reward'] = round(((float)$t1 - (float)$entry) / $risk, 2);
+    $risk_eur = to_eur($risk, $rate);
+    $pick['position_size'] = $risk_eur === null
+        ? null
+        : (int)floor($account * ACCOUNT_RISK_PCT / 100.0 / $risk_eur);
     return $pick;
 }
 
@@ -188,11 +266,11 @@ function decode_json_column(?string $raw): array {
     return is_array($decoded) ? $decoded : [];
 }
 
-function decode_pick(array $row, float $account): array {
+function decode_pick(array $row, float $account, ?float $rate = null): array {
     foreach (JSON_COLUMNS as $column) {
         $row[$column] = decode_json_column($row[$column] ?? null);
     }
-    return with_derived_levels($row, $account);
+    return with_derived_levels($row, $account, $rate);
 }
 
 function list_reports(PDO $pdo, float $account, int $limit = 50): array {
@@ -210,8 +288,10 @@ function list_reports(PDO $pdo, float $account, int $limit = 50): array {
         $report['rejected']  = decode_json_column($report['rejected'] ?? null);
         $report['checklist'] = decode_json_column($report['checklist'] ?? null);
         $stmt->execute([$report['date']]);
+        $rate = fx_rate($pdo, (string)$report['date']);
+        $report['fx'] = $rate;
         $report['picks'] = array_map(
-            fn(array $pick): array => with_derived_levels($pick, $account),
+            fn(array $pick): array => with_derived_levels($pick, $account, $rate['rate'] ?? null),
             $stmt->fetchAll());
     }
     unset($report);   // sonst zeigt $report weiter in das letzte Element
@@ -228,10 +308,13 @@ function get_report(PDO $pdo, string $date, float $account): ?array {
     $report['rejected']  = decode_json_column($report['rejected'] ?? null);
     $report['checklist'] = decode_json_column($report['checklist'] ?? null);
 
+    $report['fx'] = fx_rate($pdo, $date);
+    $rate = $report['fx']['rate'] ?? null;
+
     $stmt = $pdo->prepare('SELECT * FROM picks WHERE report_date = ? ORDER BY rank');
     $stmt->execute([$date]);
     $report['picks'] = array_map(
-        fn(array $pick): array => decode_pick($pick, $account), $stmt->fetchAll());
+        fn(array $pick): array => decode_pick($pick, $account, $rate), $stmt->fetchAll());
 
     // Die Reportseite zeichnet je Pick einen Miniatur-Chart und braucht dafuer
     // Bars. Nur der juengste Ausschnitt: die Miniatur ist ein paar Zentimeter
@@ -254,7 +337,8 @@ function get_pick(PDO $pdo, string $date, string $ticker, float $account): ?arra
     if (!$pick) {
         return null;
     }
-    $pick = decode_pick($pick, $account);
+    $pick['fx'] = fx_rate($pdo, $date);
+    $pick = decode_pick($pick, $account, $pick['fx']['rate'] ?? null);
     $stmt = $pdo->prepare(
         'SELECT date, open, high, low, close, volume FROM bars
          WHERE ticker = ? ORDER BY date');

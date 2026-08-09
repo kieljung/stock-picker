@@ -31,6 +31,43 @@ const REQUIRED_PICK_FIELDS = [
 const RATIONALE_KEYS = ['technical', 'catalyst', 'risk'];
 const PLAN_KEYS      = ['entry', 'stop', 'target1', 'target2'];
 
+// Plausibilitaetsband fuer EUR/USD. Der Kurs stand seit Einfuehrung der
+// Waehrung zwischen 0,82 und 1,60; die Grenzen sind bewusst weit. Sie fangen
+// nicht den falschen Kurs ab, sondern die vertauschte Notierung -- ein
+// versehentlich als USD-je-EUR gespeicherter Kehrwert von 0,92 landet bei
+// 1,09 und faellt hier nicht auf, ein Faktor 100 dagegen schon.
+const FX_MIN_RATE = 0.5;
+const FX_MAX_RATE = 2.0;
+
+/**
+ * Prueft [[datum, kurs], ...]. Eine leere Liste ist in Ordnung: ein Report
+ * ohne Devisenkurse ist zulaessig, er zeigt dann nur USD.
+ */
+function validate_fx(array $rows): array {
+    $errors = [];
+    foreach (array_values($rows) as $index => $row) {
+        $label = 'Devisenkurs ' . ($index + 1);
+        if (!is_array($row) || count($row) < 2) {
+            $errors[] = "$label: erwartet [datum, kurs]";
+            continue;
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$row[0])) {
+            $errors[] = "$label: '{$row[0]}' ist kein ISO-Datum";
+        }
+        if (!is_numeric($row[1])) {
+            $errors[] = "$label: Kurs ist keine Zahl";
+            continue;
+        }
+        $rate = (float)$row[1];
+        if ($rate < FX_MIN_RATE || $rate > FX_MAX_RATE) {
+            $errors[] = sprintf('%s: EUR/USD %.4f liegt ausserhalb von %.1f..%.1f'
+                . ' — vermutlich die falsche Notierung',
+                $label, $rate, FX_MIN_RATE, FX_MAX_RATE);
+        }
+    }
+    return $errors;
+}
+
 /**
  * @param array $bars Optional: [ticker => [[datum, open, high, low, close, volume], ...]].
  *                    Fehlen sie, entfaellt der Abgleich des Entrys gegen den

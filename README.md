@@ -54,6 +54,7 @@ sich aus.
 | `review.py` | Auswertung — Trefferquote und Erwartungswert je Setup-Typ |
 | `stockpicker/report.py` | Schema des Report-Dokuments, Prüfung, Projektion auf den Ledger |
 | `stockpicker/publish.py` | Payloads und HTTP-Client für die Übergabe ans Portal |
+| `stockpicker/fx.py` | EUR/USD-Tageskurse — die Anzeigeschicht für den Euro-Broker |
 | `stockpicker/dotenv.py` | Liest `.env` — API-Keys und Portal-Zugang, ohne Zusatzabhängigkeit |
 
 Die Arbeitsteilung folgt der Fehleranfälligkeit: Zahlen berechnet Code, Kontext
@@ -65,6 +66,45 @@ im Portal ein zweites Mal, bevor ein Report in die Datenbank geht — die API is
 nicht darauf angewiesen, dass der Absender schon geprüft hat.
 
 Details in `docs/plans/2026-08-09-swing-trade-prompt-design.md`.
+
+## Währung: gerechnet in USD, geordert in Euro
+
+Die Titel notieren in USD, das Depot steht in Euro. Beides gleichzeitig
+richtig zu haben, geht nur mit einer klaren Trennung:
+
+**Gerechnet wird durchgängig in USD.** Kurse, Indikatoren, Entry, Stop, die
+Prüfungen in `validate.py` und die R-Multiples im Ledger — alles in der
+Währung, in der der Titel gehandelt wird. Das ist keine Bequemlichkeit: ein
+in Euro gerechneter Stop löst aus, weil der Euro gestiegen ist, und diese
+Bewegung hat mit dem Titel nichts zu tun. Bei einem Stop 3 % unter dem Entry
+kostet ein Tag mit 1 % Euro-Stärke ein Drittel des Puffers.
+
+**Angezeigt wird zusätzlich in Euro.** Das Portal führt eine Tabelle mit dem
+EUR/USD-Tageskurs (`EURUSD=X`, aus demselben Cache wie die Kursdaten) und
+schreibt unter jedes USD-Niveau den Euro-Betrag: die Zahl, die ins
+Orderfenster gehört. Die Stückzahl rechnet gegen ein **Euro-Konto** —
+`account` in `portal/htdocs/lib/config.php` steht in EUR, das Risiko je Stück
+wird vorher umgerechnet.
+
+Gewählt wird immer der Kurs des Reporttages, nicht der von heute. Ein Report
+ist das Dokument seines Tages; würde er mit dem Tageskurs gerechnet, änderten
+sich die Euro-Niveaus eines längst geschlossenen Trades noch Monate später.
+Für den frischen Report von heute ist beides dasselbe.
+
+Kennt das Portal für einen Tag keinen Kurs, bleibt die Euro-Zeile weg und die
+Stückzahl leer — eine stillschweigend mit 1,00 gerechnete Position wäre bei
+EUR/USD 1,16 um 16 % zu groß. Der nächste `publish.py --sync` liefert den
+Kurs nach.
+
+Was die Euro-Beträge **nicht** sind: eine Abrechnung. Ein Broker stellt zum
+Kurs der Ausführung ab und nimmt eine Fremdwährungsmarge; bei Trade Republic
+kommt hinzu, dass US-Titel dort über einen europäischen Handelsplatz laufen,
+dessen Euro-Notierung nicht bei jedem Tick zum US-Kurs passt. Die Zahlen im
+Portal sind Orientierung für die Ordergröße, nicht die erwartete Abrechnung.
+
+Ob ein Titel bei deinem Broker überhaupt handelbar ist, prüft das Werkzeug
+nicht — der Screener kennt nur den Russell 2000, nicht das Angebot einer
+App. Das bleibt ein Blick von Hand vor der Order.
 
 ## Setup-Templates
 
@@ -165,15 +205,24 @@ Vier Seiten:
 
 ```bash
 cp portal/deploy.env.example portal/deploy.env
-$EDITOR portal/deploy.env      # SSH_HOST, REMOTE_PATH, BASE_URL, PORTAL_USER
+$EDITOR portal/deploy.env      # SSH_HOST, REMOTE_PATH, WEB_PATH, BASE_URL, PORTAL_USER
 ./portal/deploy.sh
 ```
 
-`deploy.sh` baut die Assets, lädt `htdocs/` per `rsync --delete` hoch, richtet
-die Serverseite ein und prüft danach, ob der Schutz greift. Es ist idempotent:
-ein zweiter Lauf ohne Änderungen lässt Datenbank und Passwort in Ruhe. Beides
-ist vom Upload ausgenommen, und ein `--dry-run` von rsync bricht ab, falls die
-Ausschlüsse doch einmal nicht greifen sollten.
+`deploy.sh` baut die Assets, lädt `htdocs/` per `tar` über SSH hoch, entfernt
+danach auf dem Server, was lokal fehlt, richtet die Serverseite ein und prüft
+zum Schluss, ob der Schutz greift. Es ist idempotent: ein zweiter Lauf ohne
+Änderungen lässt Datenbank und Passwort in Ruhe. Beides ist vom Aufräumen
+ausgenommen, und das Skript bricht ab, falls die Ausnahmen doch einmal nicht
+greifen sollten.
+
+`rsync` setzt das Skript nicht voraus: Hoster mit eingeschränkter Shell haben
+es oft nicht. Aus demselben Grund gibt es `WEB_PATH`. Ist die SSH-Sitzung
+chrooted — bei Plesk der Normalfall —, sieht die Shell den Document-Root unter
+einem anderen Pfad als der Webserver. Für `AuthUserFile` in der `.htaccess`
+zählt die Sicht des Webservers; steht dort der Pfad der Shell, antwortet die
+Seite auf jede Anfrage *mit* Zugangsdaten mit 500. Sind beide Pfade gleich,
+bleibt `WEB_PATH` leer.
 
 Das Passwort erzeugt der erste Lauf selbst — 32 Zeichen aus Buchstaben und
 Ziffern. Der bcrypt-Hash landet als `.htpasswd` im Document-Root, das Passwort
@@ -221,8 +270,9 @@ nie geändert; ein neuer Name wäre eine leere Datenbank.
   Rewriting. Reicht der Hoster nur einzelne Direktiven durch, braucht es
   `AuthConfig`, `FileInfo`, `Limit` und `Indexes`.
 
-Lokal braucht `deploy.sh` `ssh`, `rsync`, `curl`, `npm`, `openssl` und
-entweder `htpasswd` oder `php`. Der SSH-Zugang muss ohne Passwortabfrage
+Lokal braucht `deploy.sh` `ssh`, `tar`, `curl`, `npm`, `openssl` und
+entweder `htpasswd` oder `php`; auf dem Server `tar`, `find`, `sed`, `grep`
+und `php`. Beide Listen prüft der erste Schritt. Der SSH-Zugang muss ohne Passwortabfrage
 funktionieren, sonst hängt das Skript.
 
 ### Assets und Tests
@@ -237,8 +287,8 @@ lightweight-charts aus `node_modules` nach `htdocs/assets/`. Diese Dateien sind
 gitignored; `htdocs/assets/chart.js` ist dagegen Quelltext und versioniert.
 
 `run.sh` läuft alle `test_*.php` durch und überspringt sich mit Exit 0, wenn auf
-der Maschine kein `php` liegt. Ein Test-Framework gibt es bewusst nicht: bei vier
-Tabellen und vier Endpunkten wäre PHPUnit mehr Konfiguration als Testcode. Der
+der Maschine kein `php` liegt. Ein Test-Framework gibt es bewusst nicht: bei fünf
+Tabellen und fünf Endpunkten wäre PHPUnit mehr Konfiguration als Testcode. Der
 API-Test startet sich seinen eigenen `php -S` auf einem freien Port und räumt
 ihn wieder ab.
 

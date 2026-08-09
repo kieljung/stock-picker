@@ -1,6 +1,6 @@
 <?php
-// Minimaler Test-Runner. Kein Framework: das Portal hat vier Tabellen und
-// vier Endpunkte, PHPUnit waere mehr Konfiguration als Testcode.
+// Minimaler Test-Runner. Kein Framework: das Portal hat fuenf Tabellen und
+// fuenf Endpunkte, PHPUnit waere mehr Konfiguration als Testcode.
 
 $GLOBALS['tests_run'] = 0;
 $GLOBALS['tests_failed'] = 0;

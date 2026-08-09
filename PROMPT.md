@@ -270,7 +270,12 @@ Feldregeln:
 - `rank` zählt ab 1 in der Reihenfolge des Composite-Scores.
 - `risk_reward` ist das Chance-Risiko-Verhältnis zu Target 1,
   `(Target 1 − Entry) ÷ (Entry − Stop)`, auf zwei Stellen gerundet.
-- `position_size` ist `Kontogröße × 0,01 ÷ (Entry − Stop)`, abgerundet, bei 10.000 USD Konto.
+- `entry`, `stop`, `target1` und `target2` stehen **in USD** — so notieren die
+  Titel an ihrer Heimatbörse, und so liegen die Kurse in `candidates.json`.
+  Rechne nichts in Euro um; das Portal legt die EUR-Anzeige selbst darüber.
+- `position_size` ist `Kontogröße × 0,01 ÷ (Entry − Stop)`, abgerundet, bei
+  10.000 EUR Konto. Das Feld ist eine Näherung: das Portal rechnet es mit dem
+  Devisenkurs des Tages neu und überschreibt deinen Wert.
 - `metrics` ist der Kandidaten-Datensatz des Tickers aus `candidates.json`,
   **wörtlich kopiert**. Rechne dort nichts um und lass nichts weg — das Portal
   zeichnet daraus die Kennzahlenbalken.

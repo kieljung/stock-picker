@@ -17,6 +17,10 @@ laedt ``market.get_history`` nur die Luecke nach.
 ``--dry-run`` laedt grundsaetzlich nichts nach: er liest allein den Cache und
 sagt, was gesendet wuerde. Ein Probelauf, der erst das Netz braucht, prueft
 nicht mehr, er handelt schon.
+
+Mitgeliefert werden ausserdem die EUR/USD-Tageskurse. Gerechnet wird weiter
+in USD -- das Portal legt daraus nur die EUR-Anzeige darueber, mit der sich
+eine Order bei einem Euro-Broker aufgeben laesst.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from stockpicker import ledger, market, outcomes, publish, report, store
+from stockpicker import fx, ledger, market, outcomes, publish, report, store
 from stockpicker.config import TRADE
 
 #: Wie weit die Historie zurueckreicht, die mit einem Report ins Portal geht.
@@ -60,6 +64,27 @@ def load_history(tickers: list[str], conn: sqlite3.Connection, *,
         file=sys.stderr,
     )
     return history
+
+
+def load_rates(conn: sqlite3.Connection, *, offline: bool) -> dict[dt.date, float]:
+    """EUR/USD-Tageskurse fuer die Umrechnung im Portal.
+
+    Ein fehlender Devisenkurs darf keinen Report aufhalten -- er kostet nur
+    die EUR-Anzeige, nicht die Auswahl. Deshalb wird gewarnt statt abgebrochen.
+    """
+    rates = fx.get_rates(conn, offline=offline, verbose=True)
+    if not rates:
+        print("  ! Keine EUR/USD-Kurse — das Portal zeigt die Niveaus nur in USD",
+              file=sys.stderr)
+    return rates
+
+
+def rates_since(rates: dict[dt.date, float], start: dt.date) -> dict[dt.date, float]:
+    """Kurse ab ``start``. Ein Tag Vorlauf bleibt drin, damit ein Report an
+    einem Devisenfeiertag den Kurs des Vortags noch findet."""
+    earlier = [d for d in rates if d < start]
+    keep = max(earlier) if earlier else None
+    return {d: r for d, r in rates.items() if d >= start or d == keep}
 
 
 def bar_dates(frame: pd.DataFrame) -> list[dt.date]:
@@ -109,14 +134,21 @@ def push_report(creds, path: Path, conn: sqlite3.Connection, *, dry_run: bool) -
 
     start = dt.date.fromisoformat(doc["date"]) - dt.timedelta(days=HISTORY_MONTHS * 31)
     history = load_history(tickers, conn, offline=dry_run)
-    payload = publish.report_payload(doc, trim(history, start))
+    rates = load_rates(conn, offline=dry_run)
+    payload = publish.report_payload(doc, trim(history, start), rates_since(rates, start))
 
     if dry_run:
         size = len(json.dumps(payload).encode("utf-8"))
         bars = sum(len(rows) for rows in payload["bars"].values())
         print(f"dry-run: Report {doc['date']}, {len(doc['picks'])} Picks, "
               f"{len(payload['bars'])} davon mit Kursdaten im Cache, "
-              f"{bars} Bars, {size / 1024:.0f} KB.")
+              f"{bars} Bars, {len(payload.get('fx', []))} EUR/USD-Kurse, "
+              f"{size / 1024:.0f} KB.")
+        rate = fx.rate_on(rates, dt.date.fromisoformat(doc["date"]))
+        if rate:
+            print(f"  EUR/USD am {doc['date']}: {rate:.4f} — "
+                  f"ein Entry von 20 USD steht im Portal als "
+                  f"{20 / rate:.2f} EUR.")
         for ticker in tickers:
             if ticker not in payload["bars"]:
                 print(f"  ! {ticker}: keine Kurse im Cache ab {start} — "
@@ -126,8 +158,9 @@ def push_report(creds, path: Path, conn: sqlite3.Connection, *, dry_run: bool) -
         return 0
 
     result = publish.post(creds, "/api/reports", payload)
-    print(f"OK: Report {result['date']} mit {result['picks']} Picks und "
-          f"{result['bars_written']} Bars uebergeben"
+    print(f"OK: Report {result['date']} mit {result['picks']} Picks, "
+          f"{result['bars_written']} Bars und {result.get('fx_written', 0)} "
+          f"EUR/USD-Kursen uebergeben"
           f"{' (ersetzt)' if result.get('replaced') else ''}.")
     return 0
 
@@ -143,6 +176,7 @@ def sync(creds, ledger_path: Path, conn: sqlite3.Connection, *,
     first = min(dt.date.fromisoformat(entry["date"]) for entry in entries)
     history = load_history(tickers, conn, offline=dry_run)
     bars = publish.bars_payload(trim(history, first))
+    rates = publish.fx_payload(rates_since(load_rates(conn, offline=dry_run), first))
 
     results: list[dict] = []
     missing: list[str] = []
@@ -160,7 +194,8 @@ def sync(creds, ledger_path: Path, conn: sqlite3.Connection, *,
 
     if dry_run:
         print(f"dry-run: {len(entries)} offene Picks, "
-              f"{sum(len(rows) for rows in bars.values())} Bars ab {first} aus dem "
+              f"{sum(len(rows) for rows in bars.values())} Bars und "
+              f"{len(rates)} EUR/USD-Kurse ab {first} aus dem "
               f"Cache, {len(results)} Ausgaenge im Fenster von {days} Tagen.")
         for row in publish.outcomes_payload(results):
             print(f"  {row['date']}  {row['ticker']:<6} {row['status']:<14} "
@@ -172,8 +207,9 @@ def sync(creds, ledger_path: Path, conn: sqlite3.Connection, *,
         return 0
 
     bar_result = publish.post(creds, "/api/bars", bars)
+    fx_result = publish.post(creds, "/api/fx", rates) if rates else {"written": 0}
     outcome_result = publish.post(creds, "/api/outcomes", publish.outcomes_payload(results))
-    print(f"OK: {bar_result['written']} Bars, "
+    print(f"OK: {bar_result['written']} Bars, {fx_result['written']} EUR/USD-Kurse, "
           f"{outcome_result['updated']} Ausgaenge aktualisiert.")
     return 0
 

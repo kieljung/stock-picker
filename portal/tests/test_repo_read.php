@@ -15,6 +15,10 @@ $pdo = db_connect(':memory:');
 migrate($pdo);
 save_report($pdo, fixture_document());
 
+// Das Konto steht in EUR, die Niveaus in USD. Ohne diesen Kurs bliebe jede
+// Stueckzahl unten leer -- genau das prueft test_fx.php.
+save_fx($pdo, [['2026-08-09', 1.09]]);
+
 $reports = list_reports($pdo, $account);
 assert_equals(1, count($reports), 'Ein Report gelistet');
 assert_equals(2, count($reports[0]['picks']), 'Mit seinen zwei Picks');
@@ -38,34 +42,36 @@ assert_equals(null, get_pick($pdo, '2026-08-09', 'NOPE', $account), 'Unbekannter
 
 // --- Abgeleitete Werte: nie dem Modell glauben, wenn man rechnen kann -----
 
-// XYZ: (48.20 - 42.80) / (42.80 - 40.10) = 2.0, floor(100 / 2.70) = 37
+// XYZ: (48.20 - 42.80) / (42.80 - 40.10) = 2.0. Risiko 2,70 USD, bei
+// EUR/USD 1,09 also 2,4771 EUR; floor(100 / 2.4771) = 40.
 assert_equals(2.0, $pick['risk_reward'], 'R:R aus Entry, Stop und Target 1 gerechnet');
-assert_equals(37, $pick['position_size'], 'Positionsgroesse aus einem Prozent Kontorisiko');
+assert_equals(40, $pick['position_size'], 'Positionsgroesse aus einem Prozent Kontorisiko');
 
-// ABC: (34.50 - 30.00) / (30.00 - 28.00) = 2.25, floor(100 / 2.00) = 50
+// ABC: (34.50 - 30.00) / (30.00 - 28.00) = 2.25. Risiko 2,00 USD = 1,8349 EUR;
+// floor(100 / 1.8349) = 54.
 $abc = get_pick($pdo, '2026-08-09', 'ABC', $account);
 assert_equals(2.25, $abc['risk_reward'], 'R:R des zweiten Picks');
-assert_equals(50, $abc['position_size'], 'Positionsgroesse des zweiten Picks');
+assert_equals(54, $abc['position_size'], 'Positionsgroesse des zweiten Picks');
 
 // Gespeicherte Werte sind Modell-Arithmetik und werden beim Lesen ueberschrieben.
 $pdo->exec("UPDATE picks SET risk_reward = 9.99, position_size = 1
             WHERE report_date = '2026-08-09' AND ticker = 'XYZ'");
 assert_equals(2.0, get_pick($pdo, '2026-08-09', 'XYZ', $account)['risk_reward'],
     'Falsches gespeichertes R:R wird in get_pick korrigiert');
-assert_equals(37, get_pick($pdo, '2026-08-09', 'XYZ', $account)['position_size'],
+assert_equals(40, get_pick($pdo, '2026-08-09', 'XYZ', $account)['position_size'],
     'Falsche gespeicherte Positionsgroesse wird in get_pick korrigiert');
 
 $corrected = get_report($pdo, '2026-08-09', $account)['picks'][0];
 assert_equals(2.0, $corrected['risk_reward'], 'get_report korrigiert ebenso');
-assert_equals(37, $corrected['position_size'], 'get_report korrigiert auch die Stueckzahl');
+assert_equals(40, $corrected['position_size'], 'get_report korrigiert auch die Stueckzahl');
 
 $listed = list_reports($pdo, $account)[0]['picks'][0];
 assert_equals(2.0, $listed['risk_reward'], 'list_reports korrigiert ebenso');
-assert_equals(37, $listed['position_size'], 'list_reports korrigiert auch die Stueckzahl');
+assert_equals(40, $listed['position_size'], 'list_reports korrigiert auch die Stueckzahl');
 
 // Eine halbierte Kontogroesse halbiert die Stueckzahl, nicht das Verhaeltnis.
 $half = get_pick($pdo, '2026-08-09', 'XYZ', 5000.0);
-assert_equals(18, $half['position_size'], 'Kontogroesse geht in die Stueckzahl ein');
+assert_equals(20, $half['position_size'], 'Kontogroesse geht in die Stueckzahl ein');
 assert_equals(2.0, $half['risk_reward'], 'R:R haengt nicht an der Kontogroesse');
 
 // --- Aggregation, Zahl fuer Zahl wie stockpicker/outcomes.py --------------

@@ -7,5 +7,8 @@ return [
     'db'      => __DIR__ . '/../data/portal.sqlite',
     'log'     => __DIR__ . '/../data/portal.log',
     'title'   => 'stock-picker',
-    'account' => 10000.0,   // Kontogroesse fuer die Positionsgroessen-Anzeige
+    // Kontogroesse in EUR -- die Waehrung des Depots, nicht die der Kurse.
+    // Die Positionsgroesse rechnet das Risiko je Stueck erst mit dem
+    // Tageskurs nach EUR um; ohne Devisenkurs bleibt sie leer.
+    'account' => 10000.0,
 ];

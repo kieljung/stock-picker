@@ -57,6 +57,27 @@ CURLCFG
   fi
 }
 
+# Schreibt die Zugangsdaten nach ../.env. Wird aufgerufen, sobald die
+# .htpasswd auf dem Server liegt -- nicht erst am Ende: scheitert die
+# Pruefung in Schritt 6, gilt das neue Passwort auf dem Server trotzdem
+# schon, und ein Passwort, das nur der Server kennt, sperrt aus.
+write_env_credentials() {
+  # Alte PORTAL_*-Zeilen raus, neue rein. Erst in eine Datei mit 600, dann
+  # an ihren Platz -- ein Zwischenstand mit 644 waere ein lesbares Passwort
+  # auf einem Mehrbenutzersystem.
+  local env_tmp="$TMP/env"
+  ( umask 077
+    grep -vE '^[[:space:]]*(export[[:space:]]+)?PORTAL_(URL|USER|PASSWORD)=' "$ENV_FILE" 2>/dev/null > "$env_tmp" || true
+    {
+      echo "PORTAL_URL=$BASE_URL"
+      echo "PORTAL_USER=$PORTAL_USER"
+      echo "PORTAL_PASSWORD=$PASSWORD"
+    } >> "$env_tmp" )
+  [[ -f "$ENV_FILE" ]] || ( umask 077; : > "$ENV_FILE" )
+  chmod 600 "$ENV_FILE"
+  cat "$env_tmp" > "$ENV_FILE"
+}
+
 FAILED=0
 check() {
   local url="$1" expected="$2" label="$3" user="${4:-}" pass="${5:-}"
@@ -83,6 +104,17 @@ for var in SSH_HOST REMOTE_PATH BASE_URL PORTAL_USER; do
   [[ -n "${!var:-}" ]] || die "deploy.env: $var ist leer."
 done
 
+# WEB_PATH ist derselbe Ordner, nur aus der Sicht des Webservers. Auf
+# Hostern mit chroot-SSH (Plesk) sind die beiden Pfade verschieden: die
+# SSH-Sitzung sieht /domain.de/httpdocs, Apache /var/www/vhosts/...
+# /domain.de/httpdocs. Der Unterschied faellt nur an einer Stelle auf, dort
+# aber hart: AuthUserFile in der .htaccess liest Apache, nicht die
+# SSH-Shell. Steht dort der chroot-Pfad, findet Apache die Datei nicht --
+# ohne Zugangsdaten kommt weiter ein sauberes 401, mit Zugangsdaten aber
+# ein 500, und das fuer jede Datei der Seite.
+# Ohne chroot sind beide Pfade gleich; dann darf WEB_PATH leer bleiben.
+WEB_PATH="${WEB_PATH:-$REMOTE_PATH}"
+
 # REMOTE_PATH wird in Remote-Kommandos eingesetzt und muss deshalb ein
 # absoluter Pfad ohne Sonderzeichen sein. Das schliesst nebenbei die
 # Zeichen aus, an denen eine sed-Ersetzung oder eine Shell-Zitierung
@@ -91,11 +123,15 @@ done
   || die "REMOTE_PATH muss ein absoluter Pfad aus [A-Za-z0-9._/-] sein: '$REMOTE_PATH'"
 REMOTE_PATH="${REMOTE_PATH%/}"
 [[ -n "$REMOTE_PATH" ]] || die "REMOTE_PATH darf nicht / sein."
+[[ "$WEB_PATH" =~ ^/[A-Za-z0-9._/-]*$ ]] \
+  || die "WEB_PATH muss ein absoluter Pfad aus [A-Za-z0-9._/-] sein: '$WEB_PATH'"
+WEB_PATH="${WEB_PATH%/}"
+[[ -n "$WEB_PATH" ]] || die "WEB_PATH darf nicht / sein."
 [[ "$SSH_HOST" =~ ^[A-Za-z0-9._@%:-]+$ ]] || die "SSH_HOST enthaelt unerlaubte Zeichen: '$SSH_HOST'"
 [[ "$BASE_URL" =~ ^https?://[^[:space:]]+$ ]] || die "BASE_URL muss mit http:// oder https:// beginnen."
 BASE_URL="${BASE_URL%/}"
 
-for tool in ssh rsync curl npm openssl; do
+for tool in ssh tar curl npm openssl; do
   command -v "$tool" >/dev/null || die "$tool nicht gefunden."
 done
 if ! command -v htpasswd >/dev/null && ! command -v php >/dev/null; then
@@ -109,8 +145,18 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=15 "$SSH_HOST" true 2>/dev/null; the
   die "Keine SSH-Verbindung zu '$SSH_HOST'. Pruefe SSH_HOST in deploy.env und dass
   ein Schluessel ohne Passphrase-Abfrage hinterlegt ist (BatchMode)."
 fi
-HTPASSWD_REMOTE="$REMOTE_PATH/$HTPASSWD_NAME"
+
+# Der Hoster gibt nur eine chroot-Shell mit einem kleinen Werkzeugsatz.
+# Fehlt dort etwas, faellt es hier auf und nicht mitten im Upload.
+MISSING="$(ssh "$SSH_HOST" 'for t in tar find sed grep php chmod mkdir rm rmdir; do
+  command -v "$t" >/dev/null || echo "$t"
+done')" || die "Werkzeug-Pruefung auf dem Server fehlgeschlagen."
+[[ -z "$MISSING" ]] || die "Auf dem Server fehlen: $(echo $MISSING). Ohne sie laeuft das Deployment nicht."
+
+HTPASSWD_REMOTE="$REMOTE_PATH/$HTPASSWD_NAME"   # zum Schreiben ueber ssh
+HTPASSWD_WEB="$WEB_PATH/$HTPASSWD_NAME"         # fuer AuthUserFile in der .htaccess
 echo "   $SSH_HOST:$REMOTE_PATH — erreichbar"
+[[ "$WEB_PATH" == "$REMOTE_PATH" ]] || echo "   Webserver-Sicht: $WEB_PATH"
 
 # --------------------------------------------------------------------------
 # 2/7  Assets bauen
@@ -184,15 +230,22 @@ fi
 # --------------------------------------------------------------------------
 echo "→ 4/7  Upload"
 
-# Die beiden Ausschluesse sind der gefaehrlichste Teil dieses Skripts.
-# --delete raeumt auf dem Server alles weg, was lokal fehlt:
+# Der Hoster hat kein rsync -- die chroot-Shell kennt nur tar, find und sed.
+# Deshalb zwei Schritte: tar ueber ssh schiebt die Dateien hin, ein
+# Listenvergleich raeumt hinterher das weg, was rsync --delete entfernt
+# haette. Beides zusammen ist wie vorher idempotent.
+#
+# Die beiden Ausnahmen sind der gefaehrlichste Teil dieses Skripts.
+# Das Aufraeumen entfernt auf dem Server alles, was lokal fehlt:
 #   data/      enthaelt die SQLite-Datenbank mit dem gesamten Ledger und
 #              existiert lokal gar nicht (gitignored).
 #   .htpasswd  liegt im Document-Root, wird aber nur beim ersten Lauf oder
-#              bei --rotate-password neu geschrieben. Ohne Ausschluss
+#              bei --rotate-password neu geschrieben. Ohne Ausnahme
 #              loescht jedes Update die Zugangsdaten und sperrt das Portal
 #              entweder auf oder komplett zu.
-RSYNC_EXCLUDES=(--exclude "data/" --exclude "/$HTPASSWD_NAME" --exclude ".DS_Store" --exclude ".gitkeep")
+# Beide sind vom Vergleich ausgenommen und werden zusaetzlich unten noch
+# einmal gegengeprueft, bevor irgendetwas geloescht wird.
+KEEP_RE='^(data(/|$)|'"$HTPASSWD_NAME"'$)'
 
 # .htaccess bekommt den absoluten Pfad zur .htpasswd auf dem Server.
 # Ersetzt wird per Bash-Expansion statt per sed: sed braucht ein
@@ -201,40 +254,105 @@ RSYNC_EXCLUDES=(--exclude "data/" --exclude "/$HTPASSWD_NAME" --exclude ".DS_Sto
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cp -R htdocs/. "$TMP/"
+
+# Statt tar --exclude: der Sendekorb ist eine Wegwerfkopie, aus der das
+# Unerwuenschte einfach verschwindet. Das spart die Frage, gegen welche
+# Form des Pfades ein tar-Muster eigentlich matcht -- BSD- und GNU-tar
+# antworten darauf verschieden.
+find "$TMP" \( -name '.DS_Store' -o -name '.gitkeep' -o -name '._*' \) -delete
+rm -rf "$TMP/data" "${TMP:?}/$HTPASSWD_NAME"
+
 HTACCESS="$(cat "$TMP/.htaccess")"
 [[ "$HTACCESS" == *__AUTH_USER_FILE__* ]] || die "htdocs/.htaccess enthaelt keinen Platzhalter __AUTH_USER_FILE__."
-printf '%s\n' "${HTACCESS//__AUTH_USER_FILE__/$HTPASSWD_REMOTE}" > "$TMP/.htaccess"
-grep -q "^AuthUserFile $HTPASSWD_REMOTE\$" "$TMP/.htaccess" \
+printf '%s\n' "${HTACCESS//__AUTH_USER_FILE__/$HTPASSWD_WEB}" > "$TMP/.htaccess"
+grep -q "^AuthUserFile $HTPASSWD_WEB\$" "$TMP/.htaccess" \
   || die "Ersetzung von __AUTH_USER_FILE__ ist fehlgeschlagen."
 
-# Probelauf: die Ausschluesse werden nicht geglaubt, sondern nachgesehen.
-# Eine falsch geschriebene --exclude-Regel faellt hier auf, bevor sie
-# Daten kostet. Nebenbei sieht man, was der echte Lauf loeschen wird.
-DRY_RUN="$(rsync -a --delete --dry-run --out-format='%o %n' "${RSYNC_EXCLUDES[@]}" \
-             "$TMP/" "$SSH_HOST:$REMOTE_PATH/")"
-DELETIONS="$(printf '%s\n' "$DRY_RUN" | grep -E '^(del\.|\*?deleting)' || true)"
-if [[ -n "$DELETIONS" ]]; then
-  echo "   Der Upload wuerde diese Dateien auf dem Server entfernen:"
-  printf '%s\n' "$DELETIONS" | sed 's/^/     /'
-fi
-DANGER="$(printf '%s\n' "$DELETIONS" | awk 'NF {print $NF}' \
-            | grep -E "^(data(/|\$)|${HTPASSWD_NAME}\$)" || true)"
-if [[ -n "$DANGER" ]]; then
-  die "Abbruch: der Probelauf wuerde data/ oder $HTPASSWD_NAME loeschen.
-  Die --exclude-Regeln greifen nicht. Es wurde nichts hochgeladen."
+# Was liegt hier, was liegt dort? Verglichen werden Pfade relativ zum
+# Document-Root, beide Listen sortiert, damit comm sie gegeneinander
+# halten kann.
+LOCAL_FILES="$( cd "$TMP" && find . \( -type f -o -type l \) | sed 's#^\./##' | LC_ALL=C sort )"
+LOCAL_DIRS="$(  cd "$TMP" && find . -mindepth 1 -type d      | sed 's#^\./##' | LC_ALL=C sort )"
+
+REMOTE_LISTING="$(ssh "$SSH_HOST" bash -s -- "$REMOTE_PATH" <<'REMOTE'
+set -eu
+cd "$1"
+find . \( -type f -o -type l \) | sed 's#^\./##' | sed 's#^#F #'
+find . -mindepth 1 -type d      | sed 's#^\./##' | sed 's#^#D #'
+REMOTE
+)" || die "Das Auflisten der Dateien auf dem Server ist gescheitert."
+
+REMOTE_FILES="$(printf '%s\n' "$REMOTE_LISTING" | sed -n 's/^F //p' | grep -Ev "$KEEP_RE" | LC_ALL=C sort || true)"
+REMOTE_DIRS="$( printf '%s\n' "$REMOTE_LISTING" | sed -n 's/^D //p' | grep -Ev "$KEEP_RE" | LC_ALL=C sort || true)"
+
+STALE_FILES="$(comm -13 <(printf '%s\n' "$LOCAL_FILES") <(printf '%s\n' "$REMOTE_FILES"))"
+# Verzeichnisse absteigend, damit das tiefste zuerst faellt: ein rmdir auf
+# ein noch gefuelltes Verzeichnis scheitert sonst.
+STALE_DIRS="$(comm -13 <(printf '%s\n' "$LOCAL_DIRS") <(printf '%s\n' "$REMOTE_DIRS") | LC_ALL=C sort -r)"
+
+if [[ -n "$STALE_FILES" || -n "$STALE_DIRS" ]]; then
+  echo "   Das Aufraeumen entfernt auf dem Server:"
+  printf '%s\n' "$STALE_FILES" "$STALE_DIRS" | grep -v '^$' | sed 's/^/     /'
 fi
 
-rsync -az --delete "${RSYNC_EXCLUDES[@]}" "$TMP/" "$SSH_HOST:$REMOTE_PATH/"
+# Die Ausnahmen werden nicht geglaubt, sondern nachgesehen: eine falsch
+# geschriebene Regel faellt hier auf, bevor sie Daten kostet.
+DANGER="$(printf '%s\n' "$STALE_FILES" "$STALE_DIRS" | grep -E "$KEEP_RE" || true)"
+if [[ -n "$DANGER" ]]; then
+  die "Abbruch: das Aufraeumen wuerde data/ oder $HTPASSWD_NAME loeschen.
+  Die Ausnahmeregel greift nicht. Es wurde nichts hochgeladen."
+fi
+
+# COPYFILE_DISABLE und --no-xattrs halten die AppleDouble-Dateien (._foo)
+# und die macOS-Metadaten aus dem Archiv, die das tar von macOS sonst fuer
+# jede Datei mitschickt -- das GNU-tar der Gegenseite warnt sonst bei jeder
+# einzelnen Datei ueber unbekannte Header.
+#
+# --no-overwrite-dir ist der wichtige Teil: das Archiv enthaelt als ersten
+# Eintrag sein eigenes Wurzelverzeichnis, und dessen Rechte sind die des
+# mktemp-Verzeichnisses (700). Ohne die Option setzt das Auspacken sie dem
+# Document-Root auf, der Webserver kommt nicht mehr hinein und die ganze
+# Seite antwortet mit 403. Mit ihr behalten bestehende Verzeichnisse die
+# Rechte, die der Hoster ihnen gegeben hat.
+COPYFILE_DISABLE=1 tar -C "$TMP" --no-xattrs -czf - . \
+  | ssh "$SSH_HOST" "cd '$REMOTE_PATH' && tar -xzf - --no-overwrite-dir" \
+  || die "Der Upload ist gescheitert."
+
+# Die Namen wandern ueber die Standardeingabe und werden von der
+# Remote-Shell gelesen, nie ausgefuehrt: ein Dateiname mit Sonderzeichen
+# ist damit ein Wert und kein Kommando.
+if [[ -n "$STALE_FILES" ]]; then
+  printf '%s\n' "$STALE_FILES" \
+    | ssh "$SSH_HOST" "cd '$REMOTE_PATH' && while IFS= read -r f; do
+         [ -n \"\$f\" ] && rm -f -- \"./\$f\"
+       done" || die "Das Entfernen alter Dateien ist gescheitert."
+fi
+if [[ -n "$STALE_DIRS" ]]; then
+  # rmdir statt rm -rf: was wider Erwarten noch gefuellt ist, bleibt
+  # stehen, statt mitsamt Inhalt zu verschwinden.
+  printf '%s\n' "$STALE_DIRS" \
+    | ssh "$SSH_HOST" "cd '$REMOTE_PATH' && while IFS= read -r d; do
+         [ -n \"\$d\" ] && rmdir -- \"./\$d\" 2>/dev/null || true
+       done" || true
+fi
 
 if [[ "$NEW_PASSWORD" == true ]]; then
   # Der Hash geht ueber stdin, nicht als Argument: sonst stuende er in der
-  # Prozessliste des Servers. umask 077 sorgt dafuer, dass die Datei nie
-  # -- auch nicht fuer den Bruchteil zwischen cat und chmod -- weiter
-  # lesbar ist als noetig.
+  # Prozessliste des Servers. umask 077 sorgt dafuer, dass die Datei zwischen
+  # cat und chmod nicht weiter lesbar ist als am Ende.
+  #
+  # 644 und nicht enger: Apache liest die .htpasswd als eigener Benutzer,
+  # der weder Eigentuemer noch in dessen Gruppe ist. Mit 640 kommt er nicht
+  # an die Datei und antwortet auf jede Anfrage mit Zugangsdaten -- auch auf
+  # eine nach einer CSS-Datei -- mit 500. Vor dem Netz schuetzt die Datei
+  # nicht die Rechte, sondern die FilesMatch-Regel der .htaccess; dass sie
+  # greift, prueft Schritt 6.
   # shellcheck disable=SC2029
   printf '%s\n' "$HASH_LINE" \
-    | ssh "$SSH_HOST" "umask 077 && cat > '$HTPASSWD_REMOTE' && chmod 640 '$HTPASSWD_REMOTE'"
+    | ssh "$SSH_HOST" "umask 077 && cat > '$HTPASSWD_REMOTE' && chmod 644 '$HTPASSWD_REMOTE'"
   echo "   .htpasswd geschrieben."
+  write_env_credentials
+  echo "   Zugangsdaten in $ENV_FILE hinterlegt."
 fi
 
 # --------------------------------------------------------------------------
@@ -250,7 +368,9 @@ mkdir -p data
 # ein neuer Name waere eine leere Datenbank.
 db="$(ls data/portal-*.sqlite 2>/dev/null | head -1 || true)"
 if [ -z "$db" ]; then
-  rand="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
+  # od gibt es in der chroot-Shell des Hosters nicht, php schon.
+  rand="$(php -r 'echo bin2hex(random_bytes(8));')"
+  [ ${#rand} -eq 16 ] || { echo "Zufallsname fehlgeschlagen" >&2; exit 1; }
   db="data/portal-$rand.sqlite"
   echo "   Datenbank angelegt: $db"
 fi
@@ -302,6 +422,11 @@ if [[ "$FAILED" != 0 ]]; then
   echo "Deployment gescheitert: der Schutz greift nicht wie erwartet."
   echo "Das Portal ist hochgeladen, aber moeglicherweise offen. Pruefe die"
   echo ".htaccess-Unterstuetzung des Hosters (AllowOverride) und wiederhole."
+  echo
+  echo "Kam bei 'mit Zugangsdaten' ein 500 -- und zwar fuer jede Datei, auch"
+  echo "fuer ein CSS --, dann findet Apache die .htpasswd nicht: WEB_PATH in"
+  echo "deploy.env zeigt nicht dorthin, wo der Webserver das Verzeichnis"
+  echo "sieht. Den Pfad nennt ein <?php echo __DIR__; im Document-Root."
   if [[ "$NEW_PASSWORD" != true && -n "$PASSWORD" ]]; then
     echo "Schlug nur der Zugangs-Test fehl, passt das Passwort in $ENV_FILE nicht"
     echo "mehr zur .htpasswd auf dem Server: ./deploy.sh --rotate-password."
@@ -314,21 +439,6 @@ fi
 # --------------------------------------------------------------------------
 echo "→ 7/7  Fertig"
 if [[ "$NEW_PASSWORD" == true ]]; then
-  # .env neu schreiben: alte PORTAL_*-Zeilen raus, neue rein. Erst in eine
-  # Datei mit 600, dann an ihren Platz -- ein Zwischenstand mit 644 waere
-  # ein lesbares Passwort auf einem Mehrbenutzersystem.
-  ENV_TMP="$TMP/env"
-  ( umask 077
-    grep -vE '^[[:space:]]*(export[[:space:]]+)?PORTAL_(URL|USER|PASSWORD)=' "$ENV_FILE" 2>/dev/null > "$ENV_TMP" || true
-    {
-      echo "PORTAL_URL=$BASE_URL"
-      echo "PORTAL_USER=$PORTAL_USER"
-      echo "PORTAL_PASSWORD=$PASSWORD"
-    } >> "$ENV_TMP" )
-  [[ -f "$ENV_FILE" ]] || ( umask 077; : > "$ENV_FILE" )
-  chmod 600 "$ENV_FILE"
-  cat "$ENV_TMP" > "$ENV_FILE"
-
   cat <<BANNER
 
   ┌────────────────────────────────────────────────────────┐

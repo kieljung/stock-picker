@@ -74,6 +74,79 @@
     return typeof time === 'string' && time >= first && time <= shiftDate(last, 7);
   }
 
+  /**
+   * Haengt die R-Leiter neben dem Chart an dessen Preisskala.
+   *
+   * Die Leiter ist eigenes Markup und rechnete ihre Positionen bisher selbst
+   * aus -- auf einem Massstab von Stop bis Target 2, waehrend der Chart auf
+   * Tief bis Hoch der Kurshistorie skaliert. Zwei Skalen nebeneinander, die
+   * nichts voneinander wissen: dieselbe Zahl stand links und rechts auf
+   * verschiedenen Hoehen. Deshalb kommen die Positionen jetzt aus
+   * priceToCoordinate() und damit aus derselben Quelle wie die Kerzen.
+   *
+   * Der zurueckgegebene Aufruf ist wiederholbar und muss es sein: die
+   * Preisskala aendert sich beim Zoomen, beim Scrollen und bei jeder
+   * Groessenaenderung des Fensters.
+   */
+  function ladderPlacer(container, series) {
+    if (!container.id) { return null; }
+    var ladder = document.querySelector('[data-chart-ladder="' + container.id + '"]');
+    if (!ladder) { return null; }
+    var rungs = Array.prototype.slice.call(ladder.querySelectorAll('[data-price]'));
+    if (!rungs.length) { return null; }
+
+    // Hoehe einer Beschriftungszeile plus etwas Luft. Darunter beruehren
+    // sich zwei Texte.
+    var MIN_GAP = 13;
+
+    return function place() {
+      var visible = [];
+
+      rungs.forEach(function (rung) {
+        var price = parseFloat(rung.dataset.price);
+        var y = isFinite(price) ? series.priceToCoordinate(price) : null;
+        if (y === null || y === undefined || isNaN(y)) {
+          // Ausserhalb der Skala lieber nichts zeigen als etwas Falsches.
+          rung.style.visibility = 'hidden';
+          return;
+        }
+        rung.style.visibility = '';
+        // Die Sprosse haengt an ihrer Unterkante, dort sitzt der Strich --
+        // genau wie beim prozentualen Fallback aus dem PHP-Markup.
+        rung.style.bottom = 'auto';
+        rung.style.top = y + 'px';
+        rung.style.transform = 'translateY(-100%)';
+        visible.push({
+          el: rung, y: y,
+          prio: parseInt(rung.dataset.rungPriority, 10) || 1
+        });
+      });
+
+      // Liegen zwei Niveaus dicht beieinander -- Entry und letzter Kurs sind
+      // das am Tag des Picks der Normalfall --, ueberlagern sich ihre
+      // Beschriftungen. Dann bleibt der Strich stehen, weil er die Lage
+      // zeigt, und nur der nachrangige Text weicht.
+      //
+      // Wer weicht, entscheidet die Prioritaet und nicht die Hoehe: die
+      // R-Zahl am Kurszeiger ist das Einzige, was diese Leiter zeigt und der
+      // Chart nicht. Entry, Stop und Targets stehen dort schon als
+      // Achsenbeschriftung -- sie hier ein zweites Mal zu zeigen ist der
+      // verzichtbarere Teil.
+      var claimed = [];
+      visible.slice()
+        .sort(function (a, b) { return (b.prio - a.prio) || (a.y - b.y); })
+        .forEach(function (item) {
+          var label = item.el.querySelector('[data-rung-label]');
+          if (!label) { return; }
+          var free = claimed.every(function (y) {
+            return Math.abs(y - item.y) >= MIN_GAP;
+          });
+          label.style.visibility = free ? '' : 'hidden';
+          if (free) { claimed.push(item.y); }
+        });
+    };
+  }
+
   function drawChart(container) {
     if (!LC) {
       console.error('chart.js: lightweight-charts ist nicht geladen');
@@ -99,7 +172,12 @@
       rightPriceScale: {
         visible: !mini,
         borderColor: colors.grid,
-        scaleMargins: { top: 0.05, bottom: 0.25 }
+        // Der untere Rand haelt die Kerzen ueber dem Volumen, das in den
+        // unteren 20 % der Flaeche liegt. Nicht mehr als 0,20: seit die
+        // Targets in der Skala stecken, ist die Spanne groesser, und ein
+        // groesserer Rand schiebt die Achse unter null -- eine Preisachse,
+        // die -2,00 beschriftet, behauptet Unsinn.
+        scaleMargins: { top: 0.05, bottom: 0.20 }
       },
       timeScale: { visible: !mini, borderColor: colors.grid, timeVisible: false },
       crosshair: { mode: mini ? LC.CrosshairMode.Hidden : LC.CrosshairMode.Normal },
@@ -108,10 +186,33 @@
       autoSize: true
     });
 
+    // Die vier Handelsniveaus muessen in die Autoskalierung, sonst zeichnet
+    // die Bibliothek sie ausserhalb des sichtbaren Bereichs: Targets liegen
+    // regelmaessig ueber dem hoechsten Kurs der Historie -- bei einem frischen
+    // Pick sogar immer, weil Target 1 per Definition ueber dem Entry liegt und
+    // der Entry ueber dem letzten Hoch. Ohne diesen Eingriff zeigt der Chart
+    // Stop und Entry und verschweigt beide Ziele.
+    var levels = [data.stop, data.entry, data.target1, data.target2]
+      .filter(function (value) {
+        return value !== null && value !== undefined && isFinite(+value);
+      })
+      .map(Number);
+
     var candles = chart.addSeries(LC.CandlestickSeries, {
       upColor: UP, downColor: DOWN,
       borderUpColor: UP, borderDownColor: DOWN,
-      wickUpColor: UP, wickDownColor: DOWN
+      wickUpColor: UP, wickDownColor: DOWN,
+      autoscaleInfoProvider: function (original) {
+        var res = original();
+        if (!res || !res.priceRange || !levels.length) { return res; }
+        return {
+          priceRange: {
+            minValue: Math.min.apply(null, [res.priceRange.minValue].concat(levels)),
+            maxValue: Math.max.apply(null, [res.priceRange.maxValue].concat(levels))
+          },
+          margins: res.margins
+        };
+      }
     });
     candles.setData(data.bars.map(function (b) {
       return { time: b.date, open: +b.open, high: +b.high, low: +b.low, close: +b.close };
@@ -179,6 +280,18 @@
     } else {
       chart.timeScale().setVisibleLogicalRange({ from: -1, to: data.bars.length + 3 });
     }
+
+    var place = ladderPlacer(container, candles);
+    if (place) {
+      // Der erste Aufruf erst im naechsten Frame: unmittelbar nach setData()
+      // steht das Layout noch nicht, priceToCoordinate() liefert dann null.
+      requestAnimationFrame(place);
+      chart.timeScale().subscribeVisibleLogicalRangeChange(place);
+      if (window.ResizeObserver) {
+        new ResizeObserver(place).observe(container);
+      }
+    }
+
     charts.push(chart);
     return chart;
   }

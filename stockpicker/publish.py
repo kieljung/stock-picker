@@ -60,9 +60,30 @@ def bars_payload(history: dict[str, pd.DataFrame], *,
     return payload
 
 
-def report_payload(doc: dict, history: dict[str, pd.DataFrame]) -> dict:
-    """Das Report-Dokument plus die Kurshistorie seiner Picks."""
-    return {**doc, "bars": bars_payload(history)}
+def fx_payload(rates: dict[dt.date, float], *,
+               since: dt.date | None = None) -> list[list]:
+    """EUR/USD-Tageskurse als Array-of-Arrays: Datum, Kurs.
+
+    Wie bei den Bars ist ``since`` exklusiv. Der Kurs ist USD je EUR --
+    dieselbe Notierung, die stockpicker/fx.py fuehrt.
+    """
+    return [[date.isoformat(), float(rate)]
+            for date, rate in sorted(rates.items())
+            if since is None or date > since]
+
+
+def report_payload(doc: dict, history: dict[str, pd.DataFrame],
+                   rates: dict[dt.date, float] | None = None) -> dict:
+    """Das Report-Dokument plus Kurshistorie und EUR/USD-Kurse seiner Picks.
+
+    Die Kurse gehen mit dem Report, nicht nur mit dem taeglichen Sync: sonst
+    zeigt ein frisch gepushter Report seine Niveaus so lange ohne EUR-Wert,
+    bis der naechste Sync laeuft.
+    """
+    payload = {**doc, "bars": bars_payload(history)}
+    if rates:
+        payload["fx"] = fx_payload(rates)
+    return payload
 
 
 def outcomes_payload(results: list[dict]) -> list[dict]:

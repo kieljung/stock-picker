@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// Schreibender Teil des Portals. Drei Endpunkte, alle per POST, alle
+// Schreibender Teil des Portals. Vier Endpunkte, alle per POST, alle
 // idempotent. Der Schutz ist Basic Auth im Apache (.htaccess), nicht hier.
 
 require __DIR__ . '/lib/db.php';
@@ -45,11 +45,12 @@ if ($path === 'health') {
         'reports'   => (int)$pdo->query('SELECT COUNT(*) FROM reports')->fetchColumn(),
         'picks'     => (int)$pdo->query('SELECT COUNT(*) FROM picks')->fetchColumn(),
         'bars'      => (int)$pdo->query('SELECT COUNT(*) FROM bars')->fetchColumn(),
+        'fx'        => (int)$pdo->query('SELECT COUNT(*) FROM fx')->fetchColumn(),
         'last_push' => $pdo->query('SELECT MAX(at) FROM pushes')->fetchColumn() ?: null,
     ]);
 }
 
-if (!in_array($path, ['reports', 'bars', 'outcomes'], true)) {
+if (!in_array($path, ['reports', 'bars', 'fx', 'outcomes'], true)) {
     fail(404, "Unbekannter Pfad '$path'");
 }
 if ($method !== 'POST') {
@@ -69,7 +70,9 @@ try {
     if ($path === 'reports') {
         // Die Bars kommen aus yfinance, nicht aus dem Modell: sie taugen als
         // Referenz fuer den Abgleich des Entrys in validate_report().
-        $errors = validate_report($payload, $payload['bars'] ?? []);
+        $errors = array_merge(
+            validate_report($payload, $payload['bars'] ?? []),
+            validate_fx($payload['fx'] ?? []));
         if ($errors) {
             log_push($pdo, $path, strlen($raw), 422, implode('; ', $errors));
             fail(422, 'Report abgelehnt', $errors);
@@ -77,6 +80,13 @@ try {
         $result = save_report($pdo, $payload);
     } elseif ($path === 'bars') {
         $result = ['written' => save_bars($pdo, $payload)];
+    } elseif ($path === 'fx') {
+        $errors = validate_fx($payload);
+        if ($errors) {
+            log_push($pdo, $path, strlen($raw), 422, implode('; ', $errors));
+            fail(422, 'Devisenkurse abgelehnt', $errors);
+        }
+        $result = ['written' => save_fx($pdo, $payload)];
     } else {
         $result = ['updated' => save_outcomes($pdo, $payload)];
     }

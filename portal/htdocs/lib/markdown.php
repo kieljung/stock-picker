@@ -42,6 +42,19 @@ function money(?float $value, int $decimals = 2): string {
 }
 
 /**
+ * Betrag mit Waehrungszeichen. Getrennte Funktionen statt eines Parameters:
+ * so steht an jeder Aufrufstelle im Klartext, welche Waehrung gemeint ist --
+ * die eine Verwechslung, die hier Geld kostet.
+ */
+function usd(?float $value, int $decimals = 2): string {
+    return money($value, $decimals) . ' $';
+}
+
+function eur(?float $value, int $decimals = 2): string {
+    return money($value, $decimals) . ' €';
+}
+
+/**
  * Klassen fuer einen Container mit gerenderter Modell-Prosa.
  *
  * Tailwinds Typography-Plugin ist hier nicht installiert -- prose-* waeren
