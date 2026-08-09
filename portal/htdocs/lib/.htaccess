@@ -1,0 +1,4 @@
+# Eigene Datei ohne konkurrierendes Require: ein "Require all denied"
+# neben dem "Require valid-user" der Wurzel-.htaccess gewinnt nicht
+# automatisch, weil Apache mehrere Require-Direktiven als ODER wertet.
+Require all denied

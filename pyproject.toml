@@ -1,0 +1,19 @@
+[project]
+name = "stock-picker"
+version = "0.1.0"
+description = "Small-cap swing trading screener and analysis prompt"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "yfinance>=0.2.50",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

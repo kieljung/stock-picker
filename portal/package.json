@@ -1,0 +1,14 @@
+{
+  "name": "stock-picker-portal",
+  "private": true,
+  "scripts": {
+    "build": "tailwindcss -i src/app.css -o htdocs/assets/app.css --minify && npm run vendor",
+    "vendor": "cp node_modules/flowbite/dist/flowbite.min.js htdocs/assets/ && cp node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js htdocs/assets/"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.0.0",
+    "tailwindcss": "^4.0.0",
+    "flowbite": "^4.0.0",
+    "lightweight-charts": "^5.0.0"
+  }
+}

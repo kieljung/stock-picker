@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/cache/
+out/
+candidates.json
+picks.json
+.env
+
+# Portal
+portal/deploy.env
+portal/node_modules/
+portal/htdocs/data/
+portal/htdocs/assets/*.css
+portal/htdocs/assets/*.js

@@ -1,0 +1,27 @@
+/* Tailwind-Quelle des Portals. Gebaut wird mit @tailwindcss/cli (siehe
+   package.json), einmal je Deployment -- Tailwind 4 scannt zur Buildzeit,
+   also muessen die PHP-Views beim Bauen vorliegen.
+
+   Reihenfolge und Inhalt folgen der Installationsanleitung von Flowbite 4
+   (node_modules/flowbite/README.md, Abschnitt "Install using NPM"):
+   Theme-Variablen, dann Plugin, dann die Quellen. Das Google-Fonts-@import
+   fuer Inter aus der Anleitung bleibt weg: es waere ein externer Request je
+   Seitenaufruf, und --font-sans faellt sauber auf system-ui zurueck. */
+
+@import "tailwindcss";
+@import "flowbite/src/themes/default";
+
+@plugin "flowbite/plugin";
+
+/* Die Views des Portals. Klassen stehen ausschliesslich in PHP-Dateien
+   unter htdocs/, inklusive htdocs/lib/views/. */
+@source "../htdocs/**/*.php";
+
+/* Flowbite haengt einen Teil seiner Klassen erst zur Laufzeit per JS an
+   (Dropdown, Modal, Tooltip-Positionierung). Die stehen in keiner PHP-Datei
+   und muessen aus dem Paket selbst eingesammelt werden. */
+@source "../node_modules/flowbite";
+
+/* Flowbites Theme schaltet Dark Mode ueber .dark, nicht ueber
+   prefers-color-scheme -- der Standard von Tailwind 4 passt hier nicht. */
+@custom-variant dark (&:where(.dark, .dark *));

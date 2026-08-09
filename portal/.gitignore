@@ -1,0 +1,7 @@
+node_modules/
+htdocs/assets/*.css
+htdocs/assets/*.js
+# chart.js ist Quelltext, kein Build-Artefakt -- die Regel darueber meint die
+# aus node_modules kopierten Bibliotheken.
+!htdocs/assets/chart.js
+htdocs/data/

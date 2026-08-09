@@ -1,0 +1,29 @@
+# Basic Auth fuer Portal und API. __AUTH_USER_FILE__ ersetzt deploy.sh
+# durch den absoluten Pfad der .htpasswd auf dem Server -- Apache verlangt
+# hier einen absoluten Pfad, und der ist erst beim Deployment bekannt.
+AuthType Basic
+AuthName "stock-picker"
+AuthUserFile __AUTH_USER_FILE__
+Require valid-user
+
+<FilesMatch "^\.(htaccess|htpasswd|env)$|\.(sqlite|sqlite-wal|sqlite-shm|db|log)$">
+  Require all denied
+</FilesMatch>
+
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteRule ^api/(.*)$ api.php?path=$1 [QSA,L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(.*)$ index.php?path=$1 [QSA,L]
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set Referrer-Policy "no-referrer"
+</IfModule>
