@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/cache/
+logs/
+.market-db.lock
 out/
 candidates.json
 picks.json
