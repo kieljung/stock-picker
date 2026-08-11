@@ -8,9 +8,10 @@
  * entweder durch md() (Prosa) oder durch e() (alles andere). Zahlen laufen
  * durch money(), damit Komma und Tausenderpunkt ueberall gleich aussehen.
  *
- * Die Niveaus stehen in USD -- so kommen sie aus der Pipeline und so stehen
- * sie im Chart. Darunter der EUR-Betrag zum Devisenkurs des Reporttages: die
- * Zahl fuer das Orderfenster eines Euro-Brokers.
+ * Die Niveaus stehen in EUR -- der Waehrung des Depots und des Orderfensters
+ * --, umgerechnet zum Devisenkurs des Reporttages. Darunter klein der
+ * USD-Betrag: so kommen die Niveaus aus der Pipeline, und so stehen sie in
+ * jeder Kontrolle gegen yfinance. Ohne Kurs bleibt es bei USD.
  */
 
 $date      = (string)$report['date'];
@@ -36,6 +37,12 @@ $prose = prose_classes('text-gray-700 dark:text-gray-300 '
 /** Zeitstempel wie in der Uebersicht: Datum und Uhrzeit, keine Sekunden. */
 $stamp = static fn(?string $value): string => $value
     ? str_replace('T', ' ', substr($value, 0, 16)) : '—';
+
+// Anzeigewaehrung: EUR, solange ein Kurs vorliegt, sonst der unveraenderte
+// USD-Wert. Nie eine unumgerechnete Zahl mit einem Eurozeichen daneben.
+$price_eur = static fn(mixed $value): string => !is_numeric($value)
+    ? ($rate === null ? usd(null) : eur(null))
+    : ($rate === null ? usd((float)$value) : eur(to_eur((float)$value, $rate)));
 
 $pick_url = static fn(string $ticker): string =>
     '/r/' . rawurlencode($date) . '/' . rawurlencode($ticker);
@@ -110,11 +117,10 @@ $scores = [
             <?= (int)$pick['composite'] ?>
           </td>
 <?php foreach (['entry', 'stop', 'target1'] as $level): ?>
-<?php $level_eur = to_eur(is_numeric($pick[$level]) ? (float)$pick[$level] : null, $rate); ?>
           <td class="<?= $cell ?> text-right">
-            <?= e(usd(is_numeric($pick[$level]) ? (float)$pick[$level] : null)) ?>
-<?php if ($level_eur !== null): ?>
-            <span class="block text-xs text-gray-500 dark:text-gray-400"><?= e(eur($level_eur)) ?></span>
+            <?= e($price_eur($pick[$level])) ?>
+<?php if ($rate !== null): ?>
+            <span class="block text-xs text-gray-500 dark:text-gray-400"><?= e(usd(is_numeric($pick[$level]) ? (float)$pick[$level] : null)) ?></span>
 <?php endif; ?>
           </td>
 <?php endforeach; ?>
@@ -131,11 +137,11 @@ $scores = [
 <?php if ($rate !== null): ?>
   <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
     EUR-Beträge zu EUR/USD <?= e(money($rate, 4)) ?> vom <?= e((string)$fx_date) ?>.
-    Gerechnet wird in USD; der Euro steht nur für die Order daneben.
+    Gerechnet wird weiter in USD; der USD-Wert steht klein darunter.
   </p>
 <?php else: ?>
   <p class="mt-2 text-xs text-amber-700 dark:text-amber-400">
-    Kein EUR/USD-Kurs für diesen Tag im Portal — die Niveaus stehen nur in USD.
+    Kein EUR/USD-Kurs für diesen Tag im Portal — die Niveaus stehen deshalb in USD.
   </p>
 <?php endif; ?>
 </section>
@@ -215,13 +221,13 @@ $scores = [
 
     <dl class="mt-4 grid grid-cols-2 gap-3 border-t border-gray-200 pt-4 text-sm sm:grid-cols-6 dark:border-gray-700">
 <?php
-      // [Anzeige, Zweitzeile]. Die Zweitzeile traegt den EUR-Betrag; wo
-      // keiner sinnvoll ist -- R:R ist ein Verhaeltnis, Stueck eine Anzahl --
-      // bleibt sie leer.
+      // [Anzeige, Zweitzeile]. Die Anzeige traegt den EUR-Betrag, die
+      // Zweitzeile den USD-Wert der Pipeline; wo keiner sinnvoll ist -- R:R
+      // ist ein Verhaeltnis, Stueck eine Anzahl -- bleibt sie leer.
       $price = fn(string $key): array => [
-          usd(is_numeric($pick[$key]) ? (float)$pick[$key] : null),
-          ($v = to_eur(is_numeric($pick[$key]) ? (float)$pick[$key] : null, $rate)) === null
-              ? '' : eur($v),
+          $price_eur($pick[$key]),
+          $rate === null
+              ? '' : usd(is_numeric($pick[$key]) ? (float)$pick[$key] : null),
       ];
       $levels = [
           'Entry'     => $price('entry'),

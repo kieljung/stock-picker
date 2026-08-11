@@ -5,9 +5,12 @@
  * $pick['bars'], $pick['fx'] und mit gerechnetem risk_reward/position_size)
  * und $account.
  *
- * Chart, Leiter und Kennzahlen stehen in USD -- das sind die Kurse, auf denen
- * die Auswahl beruht. Der Handelsplan traegt zusaetzlich den EUR-Betrag: das
- * ist die Zahl, die im Orderfenster eines Euro-Brokers steht.
+ * Angezeigt wird in EUR -- das ist die Waehrung des Depots und die Zahl, die
+ * im Orderfenster eines Euro-Brokers steht. Gerechnet wird unveraendert in
+ * USD: Chart, Leiter und Handelsplan zeigen dieselben USD-Niveaus, geteilt
+ * durch den Devisenkurs des Reporttages. Der USD-Wert steht klein daneben,
+ * weil die Pipeline, die Kennzahlen und jede Kontrolle gegen yfinance in USD
+ * sprechen. Ohne Kurs bleibt die Anzeige bei USD.
  *
  * Jedes Feld aus der Datenbank stammt mittelbar aus einem Sprachmodell und
  * laeuft deshalb durch e() oder md() -- ohne Ausnahme.
@@ -93,6 +96,13 @@ $rules     = TEMPLATE_THRESHOLDS[(string)$pick['setup']] ?? [];
 $rate    = $pick['fx']['rate'] ?? null;
 $fx_date = $pick['fx']['date'] ?? null;
 
+// Anzeigewaehrung. $disp rechnet eine Zahl fuer Chart und Leiter um, $price
+// setzt sie mit Waehrungszeichen. Ohne Kurs geben beide den USD-Wert zurueck
+// -- eine unumgerechnete Zahl mit einem Eurozeichen daneben waere die
+// teuerste Art, hier zu scheitern.
+$disp  = fn(?float $usd): ?float => $rate === null ? $usd : to_eur($usd, $rate);
+$price = fn(?float $usd): string => $rate === null ? usd($usd) : eur(to_eur($usd, $rate));
+
 $entry = is_numeric($pick['entry'] ?? null) ? (float)$pick['entry'] : null;
 $stop  = is_numeric($pick['stop'] ?? null) ? (float)$pick['stop'] : null;
 $t1    = is_numeric($pick['target1'] ?? null) ? (float)$pick['target1'] : null;
@@ -116,12 +126,12 @@ if ($entry !== null && $stop !== null) {
             ['Target 1', $t1, 'bg-green-600', 'text-green-600 dark:text-green-400'],
             ['Entry',    $entry, 'bg-blue-500', 'text-blue-600 dark:text-blue-400'],
             ['Stop',     $stop, 'bg-red-600', 'text-red-600 dark:text-red-400'],
-        ] as [$label, $price, $bar, $text]) {
-            if ($price === null) {
+        ] as [$label, $level, $bar, $text]) {
+            if ($level === null) {
                 continue;
             }
-            $ladder[] = ['label' => $label, 'price' => (float)$price,
-                         'pos' => scale_pos((float)$price, $low, $high),
+            $ladder[] = ['label' => $label, 'price' => (float)$level,
+                         'pos' => scale_pos((float)$level, $low, $high),
                          'bar' => $bar, 'text' => $text];
         }
     }
@@ -140,19 +150,24 @@ $scores = [
     ['Risiko',      (int)$pick['score_risk'],     $rationale['risk'] ?? '',     'bg-amber-500'],
 ];
 
+// Der Chart traegt dieselbe Waehrung wie die Beschriftung neben ihm: die
+// Preisachse steht sonst in USD, waehrend Entry und Stop daneben in EUR
+// stehen. Die Umrechnung ist eine Streckung mit einem festen Faktor -- die
+// Form der Kerzen, die Marker und die R-Leiter bleiben davon unberuehrt.
+// Das Volumen zaehlt Stuecke und wird deshalb nicht umgerechnet.
 $chart_data = json_encode([
     'bars'        => array_map(fn(array $bar): array => [
         'date'   => (string)$bar['date'],
-        'open'   => (float)$bar['open'],
-        'high'   => (float)$bar['high'],
-        'low'    => (float)$bar['low'],
-        'close'  => (float)$bar['close'],
+        'open'   => (float)$disp((float)$bar['open']),
+        'high'   => (float)$disp((float)$bar['high']),
+        'low'    => (float)$disp((float)$bar['low']),
+        'close'  => (float)$disp((float)$bar['close']),
         'volume' => (float)$bar['volume'],
     ], $bars),
-    'entry'       => $entry,
-    'stop'        => $stop,
-    'target1'     => $t1,
-    'target2'     => $t2,
+    'entry'       => $disp($entry),
+    'stop'        => $disp($stop),
+    'target1'     => $disp($t1),
+    'target2'     => $disp($t2),
     'pickDate'    => (string)$pick['report_date'],
     'composite'   => (int)$pick['composite'],
     'triggeredOn' => $pick['triggered_on'] ?? null,
@@ -216,11 +231,11 @@ $chart_data = json_encode([
                letzter Kurs und Stop dicht beieinander, und zwei Textzeilen je
                Sprosse ueberlagern sich dort. -->
           <div class="absolute inset-x-0"
-               data-price="<?= number_format($rung['price'], 4, '.', '') ?>"
+               data-price="<?= number_format((float)$disp($rung['price']), 4, '.', '') ?>"
                style="bottom: <?= number_format($rung['pos'], 2, '.', '') ?>%">
             <div data-rung-label class="flex items-baseline justify-between gap-1 text-[10px] leading-tight">
               <span class="<?= $rung['text'] ?>"><?= e($rung['label']) ?></span>
-              <span class="text-gray-500 dark:text-gray-400"><?= usd($rung['price']) ?></span>
+              <span class="text-gray-500 dark:text-gray-400"><?= $price($rung['price']) ?></span>
             </div>
             <div class="h-0.5 w-full <?= $rung['bar'] ?>"></div>
           </div>
@@ -230,7 +245,7 @@ $chart_data = json_encode([
                die Leiter zeigt und der Chart nicht -- Entry, Stop und die
                Targets stehen dort ohnehin an der Preisachse. -->
           <div class="absolute inset-x-0" data-rung-priority="2"
-               data-price="<?= number_format((float)$last_close, 4, '.', '') ?>"
+               data-price="<?= number_format((float)$disp((float)$last_close), 4, '.', '') ?>"
                style="bottom: <?= number_format($r_pos, 2, '.', '') ?>%">
             <div data-rung-label class="flex items-baseline justify-between gap-1 text-[10px] leading-tight font-semibold text-gray-900 dark:text-white">
               <span>Kurs</span>
@@ -323,9 +338,10 @@ $chart_data = json_encode([
 
     <section class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700">
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Handelsplan</h2>
-      <!-- Die Order laeuft in EUR. Der Betrag steht klein unter dem USD-Wert,
-           nicht an seiner Stelle: Chart, Leiter und Kennzahlen daneben sind
-           USD, und zwei Massstaebe ohne Kennzeichnung waeren die teurere
+      <!-- Die Order laeuft in EUR, also fuehrt der EUR-Betrag. Der USD-Wert
+           steht klein darunter statt gar nicht: er ist die Zahl, die in der
+           Pipeline, im Ledger und bei jeder Kontrolle gegen yfinance steht,
+           und zwei Massstaebe ohne Kennzeichnung waeren die teurere
            Verwechslung. -->
       <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
 <?php foreach ([
@@ -333,13 +349,12 @@ $chart_data = json_encode([
         ['Stop',     $stop,  $plan['stop'] ?? ''],
         ['Target 1', $t1,    $plan['target1'] ?? ''],
         ['Target 2', $t2,    $plan['target2'] ?? ''],
-      ] as [$label, $price, $note]): ?>
+      ] as [$label, $level, $note]): ?>
         <div>
           <dt class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400"><?= e($label) ?></dt>
-          <dd class="font-semibold text-gray-900 dark:text-white"><?= usd($price === null ? null : (float)$price) ?></dd>
-<?php $in_eur = to_eur($price === null ? null : (float)$price, $rate); ?>
-<?php if ($in_eur !== null): ?>
-          <dd class="text-xs text-gray-600 dark:text-gray-400">≈ <?= eur($in_eur) ?></dd>
+          <dd class="font-semibold text-gray-900 dark:text-white"><?= $price($level === null ? null : (float)$level) ?></dd>
+<?php if ($rate !== null): ?>
+          <dd class="text-xs text-gray-600 dark:text-gray-400"><?= usd($level === null ? null : (float)$level) ?></dd>
 <?php endif; ?>
 <?php if (trim((string)$note) !== ''): ?>
           <dd class="text-gray-600 dark:text-gray-400"><?= e((string)$note) ?></dd>
@@ -368,14 +383,15 @@ $chart_data = json_encode([
       </dl>
 <?php if ($rate !== null): ?>
       <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        Umgerechnet mit EUR/USD <?= money($rate, 4) ?> vom <?= e((string)$fx_date) ?>.
-        Ein Broker rechnet zum Kurs der Ausführung ab und nimmt eine Marge —
-        die EUR-Beträge sind Orientierung, keine Abrechnung.
+        Alle Beträge in EUR, umgerechnet mit EUR/USD <?= money($rate, 4) ?>
+        vom <?= e((string)$fx_date) ?>; darunter steht der USD-Wert, in dem die
+        Pipeline rechnet. Ein Broker rechnet zum Kurs der Ausführung ab und
+        nimmt eine Marge — die EUR-Beträge sind Orientierung, keine Abrechnung.
       </p>
 <?php else: ?>
       <p class="mt-3 text-xs text-amber-700 dark:text-amber-400">
-        Kein EUR/USD-Kurs im Portal — die Niveaus stehen nur in USD und die
-        Stückzahl bleibt leer. Der nächste
+        Kein EUR/USD-Kurs im Portal — Chart und Niveaus stehen deshalb in USD
+        und die Stückzahl bleibt leer. Der nächste
         <code class="rounded bg-gray-100 px-1 dark:bg-gray-700">publish.py --sync</code>
         liefert den Kurs nach.
       </p>
