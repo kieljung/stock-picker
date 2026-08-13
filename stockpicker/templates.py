@@ -11,7 +11,16 @@ TEMPLATE_NAMES = ["VCP_BREAKOUT", "TREND_PULLBACK", "MEAN_REVERSION", "PEAD"]
 
 
 def _sma_stack_intact(f: dict) -> bool:
-    return f["sma20"] > f["sma50"] > f["sma200"]
+    """Steigende Reihenfolge der gleitenden Durchschnitte.
+
+    Fehlt einem der Werte -- zu kurze Historie oder eine Luecke im
+    Kurs-Cache --, steht None im Feature-Dict, und der Vergleich liefe in
+    einen TypeError. Ein unbekannter Stack ist kein intakter Stack.
+    """
+    sma20, sma50, sma200 = f["sma20"], f["sma50"], f["sma200"]
+    if sma20 is None or sma50 is None or sma200 is None:
+        return False
+    return sma20 > sma50 > sma200
 
 
 def is_vcp_breakout(f: dict) -> bool:
@@ -39,6 +48,10 @@ def is_trend_pullback(f: dict) -> bool:
 
 def is_mean_reversion(f: dict) -> bool:
     """Connors RSI-2 im uebergeordneten Aufwaertstrend."""
+    # Einziges Template ohne Stack-Bedingung, also ohne den Schutz aus
+    # _sma_stack_intact -- der SMA 200 wird hier direkt geprueft.
+    if f["sma200"] is None:
+        return False
     return f["close"] > f["sma200"] and f["rsi2"] < 10.0 and f["percent_b"] < 0.1
 
 

@@ -76,6 +76,27 @@ def test_save_bars_stores_nan_as_null(conn):
     assert pd.isna(store.load_bars(conn, ["AAA"])["AAA"]["Volume"].iloc[1])
 
 
+def test_save_bars_skips_a_bar_without_a_close(conn):
+    df = make_ohlcv([10.0, 11.0, 12.0])
+    df.iloc[1, df.columns.get_loc("Close")] = float("nan")
+    assert store.save_bars(conn, {"AAA": df}) == 2
+
+    loaded = store.load_bars(conn, ["AAA"])["AAA"]
+    assert loaded["Close"].tolist() == [10.0, 12.0]
+    assert not loaded["Close"].isna().any()
+
+
+def test_save_bars_does_not_overwrite_a_good_close_with_nan(conn):
+    """Der Fall vom 2026-08-11: Yahoo liefert die Bar ohne Schlusskurs nach."""
+    store.save_bars(conn, {"AAA": make_ohlcv([10.0, 11.0, 12.0])})
+
+    broken = make_ohlcv([10.0, 11.0, 12.0])
+    broken.iloc[1, broken.columns.get_loc("Close")] = float("nan")
+    store.save_bars(conn, {"AAA": broken})
+
+    assert store.load_bars(conn, ["AAA"])["AAA"]["Close"].tolist() == [10.0, 11.0, 12.0]
+
+
 # --- Metadaten -------------------------------------------------------------
 
 def test_meta_roundtrip(conn):

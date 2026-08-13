@@ -96,6 +96,32 @@ def test_neutral_stock_matches_nothing():
     assert templates.match_templates(base_features()) == []
 
 
+def test_missing_smas_match_nothing_instead_of_raising():
+    """Fehlende gleitende Durchschnitte kommen aus Luecken im Kurs-Cache.
+
+    Ein einzelnes fehlendes Close macht ueber sein Fenster jeden SMA zu
+    None; die Matcher duerfen daran nicht mit einem TypeError zerbrechen,
+    sondern muessen den Titel schlicht nicht treffen.
+    """
+    for missing in [
+        {"sma20": None, "sma50": None, "sma200": None},
+        {"sma20": None},
+        {"sma50": None},
+        {"sma200": None},
+    ]:
+        # Sonst ein glasklarer Mean-Reversion- und Trend-Pullback-Kandidat.
+        intact = dict(
+            close=50.5, sma20=50.0, sma50=48.0, sma200=45.0,
+            rs_percentile=90.0, rsi2=4.0, percent_b=0.05, rvol=0.7,
+        )
+        f = base_features(**{**intact, **missing})
+        assert "TREND_PULLBACK" not in templates.match_templates(f)
+        assert "VCP_BREAKOUT" not in templates.match_templates(f)
+
+    f = base_features(close=50.5, sma200=None, rsi2=4.0, percent_b=0.05)
+    assert templates.match_templates(f) == []
+
+
 def test_a_stock_can_match_multiple_templates():
     # close liegt 1 % ueber dem SMA 20: nah genug am Pivot fuer den
     # VCP-Breakout und zugleich ein Ruecksetzer auf den SMA 20.

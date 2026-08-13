@@ -71,10 +71,20 @@ def save_bars(conn: sqlite3.Connection, history: dict[str, pd.DataFrame]) -> int
             continue
         for index, bar in frame.iterrows():
             date = index.date() if hasattr(index, "date") else index
+            close = _f(bar.get("Close"))
+            # Eine Bar ohne Schlusskurs wird nicht geschrieben. Yahoo liefert
+            # gelegentlich eine Zeile mit Open, High, Low und Volumen, aber
+            # ohne Close; ein Upsert ueberschriebe damit einen zuvor korrekten
+            # Wert, und ein einzelnes NaN macht jeden gleitenden Durchschnitt
+            # ueber sein Fenster zunichte (rolling(..., min_periods=window)).
+            # Ueberspringen heisst zugleich: last_stored_date bleibt stehen,
+            # der naechste Delta-Lauf holt den Tag erneut.
+            if close is None:
+                continue
             rows.append((
                 ticker, date.isoformat(),
                 _f(bar.get("Open")), _f(bar.get("High")), _f(bar.get("Low")),
-                _f(bar.get("Close")), _f(bar.get("Volume")),
+                close, _f(bar.get("Volume")),
             ))
     if rows:
         conn.executemany(
