@@ -43,6 +43,96 @@ Ein korrigierter Report für ein Datum, das schon im Ledger steht, braucht
 `validate.py … --replace`; das Portal ersetzt ein bereits gepushtes Datum von
 sich aus.
 
+## Automatisierung
+
+Der Tagesablauf ist eine Kette aus drei Schritten, angestoßen von **n8n** per
+SSH auf den Host. Die Skripte wissen nichts von n8n — sie sind gewöhnliche
+Kommandos, die im Repo-Verzeichnis laufen und einen Exit-Code zurückgeben.
+Genau der ist der Vertrag zwischen Pipeline und Scheduler.
+
+| Schritt | Aufruf | Was | Wann |
+|---|---|---|---|
+| 1 | `bin/daily_run.sh screen` | Stufe 1 — Screener, schreibt `candidates.json` | Mo–Fr 06:40 |
+| 2 | `bin/analyze.sh` | Stufe 2 bis 4 — Analyse, Validierung, Report-Push | nur wenn Schritt 1 mit `0` endet |
+| 3 | `bin/daily_run.sh sync` | Kurse, Devisen und Ausgänge der offenen Picks | **immer**, wie auch immer 1 und 2 ausgehen |
+
+Verkettet wird über Exit-Codes, nicht über gestaffelte Uhrzeiten: der Screener
+braucht bei warmem Cache Minuten und bei leerem eine knappe Stunde, jede feste
+Uhrzeit wäre eine Wette auf seine Laufzeit. Scheitert Stufe 1, gibt es keine
+frische Kandidatenliste — dann darf Schritt 2 nicht anlaufen.
+
+Schritt 3 ist der leicht zu übersehende: er hängt an keinem der beiden anderen,
+sondern muss in n8n eigens verdrahtet werden, auf dem Erfolgs- **und** auf dem
+Fehlerpfad. Er pflegt die offenen Picks früherer Tage und hat mit der heutigen
+Analyse nichts zu tun außer der Reihenfolge. Fällt er still aus, stehen die
+offenen Positionen ohne frische Kurse und ohne Ausgangsprüfung da, ohne dass
+ein fehlender Ledger-Eintrag darauf hinweisen würde.
+
+> **Stand 13.08.2026:** In n8n sind bisher nur Schritt 1 und 2 verdrahtet, ohne
+> Verzweigung auf den Exit-Code. Schritt 3 fehlt — vom 11. bis 13.08. lief kein
+> Sync. Diese Notiz kann weg, sobald die Kette vollständig ist.
+
+Ein nicht ausgewerteter Exit-Code ist der eigentliche Fallstrick: ein
+Scheduler, der nur startet und nie hinsieht, macht aus jedem Fehler einen
+stillen Ausfall.
+
+Damit der Alarm ohne zweiten SSH-Aufruf brauchbar ist, teilen beide Skripte
+ihre Ausgabe auf:
+
+| Kanal | Inhalt |
+|---|---|
+| Logfile | alles, immer — der vollständige Lauf |
+| stderr | nur der Abbruchgrund, und bei einem harten Fehler zusätzlich die Ausgabe genau dieses Laufs samt Traceback |
+| stdout | im Fehlerfall leer |
+
+Ein übersprungener Lauf — belegtes Lock, Report zum Datum liegt schon vor —
+endet weiterhin mit `0`, schreibt seinen Grund aber ebenfalls nach stderr.
+Sonst wäre er von einem erfolgreichen Lauf nicht zu unterscheiden: `exit 0`
+heißt „nichts zu beanstanden", nicht „hat gearbeitet". Für die Verzweigung ist
+das richtig so, für den Wächter unten ist es der Grund, warum es ihn braucht.
+
+`bin/analyze.sh` gibt `PROMPT.md` und `candidates.json` an eine unbeaufsichtigte
+Claude-Session mit Websuche, lässt den Report nach `out/report-<datum>.json`
+schreiben und reicht ihn an `bin/report.sh` weiter — Stufe 3 bricht ab, bevor
+ein fehlerhafter Report das Portal sieht.
+
+Dass der Sync morgens statt abends läuft, kostet einen Tag Sichtbarkeit — er
+sieht die Schlusskurse des Vortags, ein Ausgang steht also am Folgemorgen im
+Portal. Ein zweiter Lauf am Abend nach US-Schluss wäre möglich, ist aber
+bewusst nicht eingerichtet.
+
+Drei Abbruchbedingungen vor dem Modellaufruf, alle aus demselben Grund: ein
+Lauf auf der falschen Kandidatenliste kostet mehr als ein ausgefallener Tag.
+Fehlt `candidates.json`, trägt sie ein anderes Datum als heute, oder gibt es
+den Report zum Datum schon, endet `analyze.sh` ohne Claude zu starten.
+
+```bash
+tail -f logs/$(date +%F).log            # der Lauf des Tages
+grep -E 'Ende: |ABBRUCH' logs/*.log     # Exit-Codes und Abbrüche aller Tage
+bin/daily_run.sh screen                 # Stufe 1 von Hand
+bin/analyze.sh --dry-run                # Stufe 2 scharf, Stufe 3 und 4 simuliert
+uv run python publish.py --sync --dry-run   # Schritt 3 ohne Portal-Push
+```
+
+Die zweite Zeile ist die schnellste Kontrolle: jeder Schritt schreibt beim
+Verlassen `Ende: … (exit=N)`, ein fehlendes Ende heißt abgestürzt oder noch
+laufend.
+
+Als Wächter gegen den stillen Ausfall gehört ein vierter n8n-Knoten hinter die
+Kette, werktags gegen 08:30:
+
+```bash
+test -f /home/heimdal/stock-picker/out/report-$(date +%F).json
+```
+
+Exit 1 heißt: kein Report für heute, gleich aus welchem Grund — Absturz,
+belegtes Lock, oder ein Knoten, der nie gefeuert hat. Der Report ist der
+bessere Anker als der Ledger, weil er auch an einem Tag ohne Picks entsteht.
+An US-Feiertagen schlägt der Wächter fälschlich an; das ist der Preis dafür,
+dass er sonst nie stillhält.
+
+Alles landet zusätzlich in `logs/YYYY-MM-DD.log`, 30 Tage lang.
+
 ## Aufbau
 
 | Datei | Rolle |
@@ -312,7 +402,6 @@ Systems.
 
 ## Bewusst nicht enthalten
 
-Kein Backtest-Framework, kein Broker-Anschluss, keine Intraday-Daten, keine
-Automatisierung der Modell-Stufe. Das Portal zeigt Ergebnisse an und nimmt sie
-entgegen — es löst nichts aus. Der Ledger liefert die Evidenz; alles Weitere
+Kein Backtest-Framework, kein Broker-Anschluss, keine Intraday-Daten. Das
+Portal zeigt Ergebnisse an und nimmt sie entgegen — es löst nichts aus. Der Ledger liefert die Evidenz; alles Weitere
 wartet, bis diese Evidenz zeigt, dass sich der Aufwand lohnt.

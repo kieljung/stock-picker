@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # Täglicher, unbeaufsichtigter Lauf der stock-picker-Pipeline.
-# Wird von den systemd-User-Timern `stockpicker-screen.timer` und
-# `stockpicker-sync.timer` gestartet.
+# Beide Modi ruft n8n per SSH auf: `screen` als ersten Schritt der Kette,
+# `sync` als letzten.
 #
 # Aufruf:         bin/daily_run.sh screen | sync
 # Manueller Test: bin/daily_run.sh sync
 # Logs:           logs/YYYY-MM-DD.log  (30 Tage Aufbewahrung)
 #
-# Automatisiert sind bewusst nur die beiden maschinellen Stufen. Stufe 2 ist
-# eine Claude-Session mit Websuche und läuft nicht unbeaufsichtigt; damit
-# bleiben auch validate.py und der Report-Push Handarbeit.
+# Dieses Skript deckt nur die beiden Stufen ab, die den Kurs-Cache anfassen:
+# Stufe 1 und den Sync. Stufe 2 bis 4 — die Claude-Session mit Websuche,
+# validate.py und der Report-Push — laufen in `bin/analyze.sh`.
+#
+# Der Exit-Code ist die Rückmeldung an n8n und wird sauber durchgereicht:
+# `screen` endet mit 0 nur dann, wenn candidates.json frisch geschrieben
+# wurde. Nur in dem Fall darf analyze.sh anlaufen. `sync` gehört dagegen auf
+# beide Pfade -- er pflegt die offenen Picks früherer Tage und hängt an der
+# heutigen Analyse nur der Reihenfolge wegen.
+#
+# Ausgaben gehen in zwei Richtungen. Vollständig und immer ins Logfile; nach
+# stderr nur, was schiefging -- der Abbruchgrund und die Ausgabe des
+# gescheiterten Laufs. Ein erfolgreicher Lauf bleibt auf stdout und stderr
+# still, damit ein Alarm in n8n den Traceback direkt enthält, statt ihn per
+# zweitem SSH-Aufruf nachladen zu müssen.
 
 set -euo pipefail
 
@@ -31,22 +43,35 @@ LOCK_FILE="$REPO/.market-db.lock"
 
 mkdir -p "$LOG_DIR"
 
+# Nur ins Logfile.
+log()  { echo "[$(date -Is)] $*" >>"$LOG_FILE"; }
+# Ins Logfile und nach stderr -- für alles, was der Aufrufer sehen muss.
+warn() { echo "[$(date -Is)] $*" | tee -a "$LOG_FILE" >&2; }
+
+# Stand des Logfiles vor dem Lauf. Scheitert er, wird ab hier nach stderr
+# nachgereicht -- genau die Zeilen dieses Laufs, nicht das ganze Tageslog.
+LOG_MARK=$(if [[ -f "$LOG_FILE" ]]; then wc -l <"$LOG_FILE"; else echo 0; fi)
+
 # flock gibt sofort auf, statt zu warten: ein hängender Lauf soll den
 # nächsten Tag nicht blockieren, sondern übersprungen werden.
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "[$(date -Is)] $MODE: Cache ist von einem anderen Lauf belegt — übersprungen." >>"$LOG_FILE"
+  # Kein Fehler, deshalb Exit 0 -- aber nach stderr, weil sonst niemand
+  # merkt, dass dieser Lauf nichts getan hat.
+  warn "$MODE: Cache ist von einem anderen Lauf belegt — übersprungen."
   exit 0
 fi
 
 cd "$REPO"
 
-# systemd-User-Services erben keine Shell-Profile. uv liegt in ~/.local/bin,
-# das die Unit über Environment=PATH mitgibt; hier steht es noch einmal,
-# damit das Skript auch von Hand aufgerufen funktioniert.
+# uv liegt in ~/.local/bin. Ein nicht-interaktives `ssh host befehl`, wie n8n
+# es absetzt, liest kein Login-Profil -- der PATH ist dann der nackte Default
+# aus /etc/environment. Diese Zeile ist deshalb die einzige Stelle, die uv
+# auffindbar macht; früher gab die systemd-Unit ihn zusätzlich per
+# Environment= mit, die gibt es nicht mehr.
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null 2>&1 || {
-  echo "[$(date -Is)] ABBRUCH: 'uv' nicht im PATH. PATH=$PATH" >>"$LOG_FILE"
+  warn "ABBRUCH: 'uv' nicht im PATH. PATH=$PATH"
   exit 1
 }
 
@@ -70,7 +95,16 @@ esac
 STATUS=$?
 set -e
 
-echo "[$(date -Is)] Ende: $MODE (exit=$STATUS)" >>"$LOG_FILE"
+log "Ende: $MODE (exit=$STATUS)"
+
+# Der Traceback steht schon im Logfile -- hier geht er zusätzlich nach
+# stderr, damit er ohne Umweg im n8n-Alarm landet.
+if [[ $STATUS -ne 0 ]]; then
+  {
+    echo "[$(date -Is)] ABBRUCH: $MODE gescheitert (exit=$STATUS). Ausgabe des Laufs:"
+    tail -n +"$((LOG_MARK + 1))" "$LOG_FILE"
+  } >&2
+fi
 
 find "$LOG_DIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
 
