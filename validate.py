@@ -14,6 +14,7 @@ wandern nur die Handelsfelder.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -47,7 +48,14 @@ def main() -> int:
     candidates = candidates_data["candidates"]
     by_ticker = {c["ticker"]: c for c in candidates}
 
-    errors = report.validate_document(doc, candidates)
+    # Zweite Verteidigungslinie gegen den Wiedereinstieg: der Screener nimmt
+    # laufende Positionen schon aus der Kandidatenliste, aber diese Pruefung
+    # haengt nicht daran, dass er es getan hat -- und sie nennt den Grund beim
+    # Namen, statt ihn als "nicht in der Kandidatenliste" zu tarnen.
+    open_positions = ledger.live_positions(
+        ledger.read_entries(Path(args.ledger)), dt.date.fromisoformat(doc["date"]))
+
+    errors = report.validate_document(doc, candidates, open_positions=open_positions)
     if errors:
         print("VALIDIERUNG FEHLGESCHLAGEN:", file=sys.stderr)
         for error in errors:

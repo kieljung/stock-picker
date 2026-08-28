@@ -174,7 +174,12 @@ function log_push(PDO $pdo, string $endpoint, int $bytes, int $status, string $d
 // dieselbe Rundung, dieselben Buckets. Weicht hier etwas ab, widersprechen
 // sich Portal und review.py bei denselben Daten.
 
-const CLOSED_STATUS  = "('TARGET1','STOP')";     // outcomes._aggregate
+// outcomes.TRADE_STATUS. TIME_STOP gehoert dazu: ein Pick, der sein Fenster
+// von hold_days_max ohne Stop und ohne Target ueberlebt hat, wird zum
+// Schlusskurs abgerechnet und ist ein Trade wie jeder andere. Fehlte er hier,
+// zaehlten nur die Ausgaenge, die einen Punkt beruehrt haben -- und weil der
+// Stop naeher liegt als das Ziel, waere das systematisch der Verlust.
+const CLOSED_STATUS  = "('TARGET1','STOP','TIME_STOP')";
 const CATALYST_BUCKETS = [                        // outcomes.CATALYST_BUCKETS
     ['stark (7-10)', 7, 10],
     ['mittel (4-6)', 4, 6],
@@ -351,7 +356,7 @@ function performance_overall(PDO $pdo, ?string $from = null, ?string $to = null)
     $where = date_filter($from, $to);
     $row = $pdo->query(
         "SELECT COUNT(*) AS trades,
-                SUM(CASE WHEN status='TARGET1' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN COALESCE(r_multiple, 0) > 0 THEN 1 ELSE 0 END) AS wins,
                 COALESCE(SUM(COALESCE(r_multiple, 0)), 0) AS total_r
          FROM picks WHERE status IN " . CLOSED_STATUS . " $where")->fetch();
 
@@ -388,7 +393,8 @@ function performance_by(PDO $pdo, string $dimension,
     $rows = $pdo->query(
         "SELECT $key AS bucket,
                 SUM(CASE WHEN status IN " . CLOSED_STATUS . " THEN 1 ELSE 0 END) AS trades,
-                SUM(CASE WHEN status='TARGET1' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN status IN " . CLOSED_STATUS . "
+                         AND COALESCE(r_multiple, 0) > 0 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN status IN " . CLOSED_STATUS . "
                          THEN COALESCE(r_multiple, 0) ELSE 0 END) AS total_r
          FROM picks WHERE 1=1 $where

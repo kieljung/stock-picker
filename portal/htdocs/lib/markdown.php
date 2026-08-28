@@ -89,6 +89,7 @@ function status_badge(?string $status): string {
         'OPEN'          => ['Offen', 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300'],
         'TARGET1'       => ['Target 1', 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300'],
         'STOP'          => ['Stop', 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'],
+        'TIME_STOP'     => ['Zeitstopp', 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300'],
         'NOT_TRIGGERED' => ['Nicht ausgelöst', 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'],
     ];
     // Ein unbekannter Status kommt aus der Datenbank und wird deshalb

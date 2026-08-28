@@ -165,6 +165,48 @@ assert_equals(1, (int)$pdo->query(
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='picks'")->fetchColumn(),
     'Tabelle picks existiert noch');
 
+// --- Zeitstopp ------------------------------------------------------------
+// Spiegel von outcomes.TRADE_STATUS. Der Stop liegt naeher am Entry als das
+// Ziel; wer nur TARGET1 und STOP zaehlt, sieht systematisch zu viel Verlust,
+// weil die zaehen Gewinner als "offen" liegen bleiben.
+
+save_report($pdo, fixture_document([
+    'date'  => '2026-08-13',
+    'picks' => [fixture_pick(['ticker' => 'TMS', 'setup' => 'PEAD']),
+                fixture_pick(['ticker' => 'TML', 'setup' => 'PEAD'])],
+    'bars'  => [],
+]));
+$pdo->exec("UPDATE picks SET status='TIME_STOP', r_multiple=0.4
+            WHERE report_date='2026-08-13' AND ticker='TMS'");
+$pdo->exec("UPDATE picks SET status='TIME_STOP', r_multiple=-0.3
+            WHERE report_date='2026-08-13' AND ticker='TML'");
+
+$overall = performance_overall($pdo, '2026-08-13', '2026-08-13');
+assert_equals(2, $overall['trades'], 'Zeitstopp zaehlt als Trade');
+assert_equals(0, $overall['open'], 'Und nicht mehr als offener Pick');
+assert_equals(50.0, $overall['win_rate'],
+    'Im Plus abgerechnet ist ein Treffer, auch ohne Target 1');
+assert_equals(0.05, $overall['expectancy_r'], 'Erwartungswert aus beiden Zeitstopps');
+
+$by_setup = performance_by($pdo, 'setup', '2026-08-13', '2026-08-13');
+assert_equals(2, $by_setup['PEAD']['trades'], 'Auch in der Gruppierung ein Trade');
+assert_equals(50.0, $by_setup['PEAD']['win_rate'], 'Und dort derselbe Gewinnerbegriff');
+
+assert_equals(2, count(cumulative_r($pdo, '2026-08-13', '2026-08-13')),
+    'Die R-Kurve nimmt den Zeitstopp mit');
+
+// Ein Pick, der sein Fenster noch vor sich hat, bleibt aussen vor.
+save_report($pdo, fixture_document([
+    'date'  => '2026-08-14',
+    'picks' => [fixture_pick(['ticker' => 'RUN'])],
+    'bars'  => [],
+]));
+$pdo->exec("UPDATE picks SET status='OPEN', r_multiple=0.9
+            WHERE report_date='2026-08-14'");
+$overall = performance_overall($pdo, '2026-08-14', '2026-08-14');
+assert_equals(0, $overall['trades'], 'Ein laufender Pick ist kein Trade');
+assert_equals(1, $overall['open'], 'Er zaehlt als offen');
+
 // --- Rundung wie Pythons round() ------------------------------------------
 
 // Genau die Haelfte geht zur geraden Ziffer: 5 von 16 Gewinnern sind 31,25 %,

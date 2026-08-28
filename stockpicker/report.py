@@ -57,7 +57,8 @@ def load_document(path: Path | str) -> dict:
 
 
 def validate_document(doc: dict, candidates: list[dict],
-                      cfg: TradeConfig = TRADE) -> list[str]:
+                      cfg: TradeConfig = TRADE,
+                      open_positions: dict[str, str] | None = None) -> list[str]:
     """Alle harten Fehler. Nicht leer heisst: Lauf abbrechen."""
     errors: list[str] = []
 
@@ -71,7 +72,7 @@ def validate_document(doc: dict, candidates: list[dict],
         errors.extend(_validate_pick_shape(pick, index))
 
     # Levels, Sektorgrenzen, Composite-Schwelle -- die bestehenden Regeln.
-    errors.extend(ledger.validate_report(doc["picks"], candidates, cfg))
+    errors.extend(ledger.validate_report(doc["picks"], candidates, cfg, open_positions))
     return errors
 
 

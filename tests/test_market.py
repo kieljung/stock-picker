@@ -188,3 +188,135 @@ def test_monday_run_does_fetch_the_delta(conn, monkeypatch):
 
     assert called == [["AAA"]]
     assert stats["delta_geladen"] == 1
+
+
+# --- Splits ----------------------------------------------------------------
+
+def events(monkeypatch, *pairs, warning=""):
+    """Ersetzt die Alpaca-Abfrage durch eine feste Antwort und merkt das Fenster."""
+    seen = {}
+
+    def fake_load(start, end):
+        seen["start"], seen["end"] = start, end
+        return {(t, dt.date.fromisoformat(d)) for t, d in pairs}, warning
+
+    monkeypatch.setattr(market.splits, "load_splits", fake_load)
+    return seen
+
+
+def test_split_purges_the_cache_and_forces_a_full_reload(conn, monkeypatch):
+    """Der eigentliche Zweck: nach einem Split darf kein Delta mehr angehaengt werden."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, ("AAA", "2026-08-24"))
+
+    purged, warning = market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+
+    assert purged == ["AAA"] and warning == ""
+    assert store.last_bar_dates(conn) == {}          # Historie ist weg
+
+    monkeypatch.setattr(fetch, "fetch_history_range", lambda *a, **k: pytest.fail("kein Delta erwartet"))
+    monkeypatch.setattr(fetch, "fetch_history",
+                        lambda tickers, period="2y": {t: bars_ending(dt.date(2026, 8, 28)) for t in tickers})
+    _, stats = market.get_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+    assert stats["voll_geladen"] == 1
+
+
+def test_the_same_split_purges_only_once(conn, monkeypatch):
+    """Sonst laedt derselbe Split jeden Tag aufs Neue zwei Jahre Historie."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, ("AAA", "2026-08-24"))
+    market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+
+    # So wie get_history es gleich danach tut: die Historie ist wieder da.
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 28))})
+
+    purged, _ = market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 31))
+    assert purged == []
+    assert store.last_bar_dates(conn) == {"AAA": dt.date(2026, 8, 28)}
+
+
+def test_a_second_split_purges_again(conn, monkeypatch):
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, ("AAA", "2026-08-24"))
+    market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 28))})
+
+    events(monkeypatch, ("AAA", "2026-08-24"), ("AAA", "2026-08-31"))
+    purged, _ = market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 31))
+    assert purged == ["AAA"]
+
+
+def test_split_of_another_ticker_leaves_the_cache_alone(conn, monkeypatch):
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27)),
+                           "BBB": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, ("BBB", "2026-08-24"), ("ZZZ", "2026-08-25"))
+
+    purged, _ = market.purge_split_history(["AAA", "BBB"], conn, today=dt.date(2026, 8, 28))
+
+    assert purged == ["BBB"]
+    assert set(store.last_bar_dates(conn)) == {"AAA"}
+
+
+def test_split_of_an_uncached_ticker_is_noted_but_purges_nothing(conn, monkeypatch):
+    """Seine Historie kommt gleich frisch -- und damit schon angepasst."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, ("NEU", "2026-08-24"))
+
+    purged, _ = market.purge_split_history(["AAA", "NEU"], conn, today=dt.date(2026, 8, 28))
+
+    assert purged == []
+    assert ("NEU", dt.date(2026, 8, 24)) in store.recorded_splits(conn)
+
+
+def test_empty_cache_asks_nothing(conn, monkeypatch):
+    """Ohne Historie gibt es nichts zu invalidieren -- auch keinen Request."""
+    monkeypatch.setattr(market.splits, "load_splits",
+                        lambda *a, **k: pytest.fail("keine Abfrage erwartet"))
+    assert market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28)) == ([], "")
+
+
+def test_first_run_looks_back_over_the_whole_cache(conn, monkeypatch):
+    """Die Tabelle ist leer: alles, was der Cache haelt, kann betroffen sein."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    seen = events(monkeypatch)
+
+    market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+
+    assert seen["start"] == dt.date(2026, 8, 28) - dt.timedelta(days=market.INITIAL_SPLIT_LOOKBACK_DAYS)
+    assert seen["end"] == dt.date(2026, 8, 28)
+
+
+def test_later_runs_only_ask_for_the_gap(conn, monkeypatch):
+    """Was davor liegt, hat ein frueherer Lauf schon gesehen."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27)),
+                           "BBB": bars_ending(dt.date(2026, 8, 25))})
+    store.record_splits(conn, {("IRGENDWER", dt.date(2026, 7, 1))})
+    seen = events(monkeypatch)
+
+    market.purge_split_history(["AAA", "BBB"], conn, today=dt.date(2026, 8, 28))
+
+    # Aeltester Cache-Stand minus die Ueberlappung des Delta-Laufs.
+    assert seen["start"] == dt.date(2026, 8, 20)
+
+
+def test_a_stale_ticker_does_not_widen_the_window_forever(conn, monkeypatch):
+    store.save_bars(conn, {"ALT": bars_ending(dt.date(2026, 1, 5))})
+    store.record_splits(conn, {("IRGENDWER", dt.date(2026, 7, 1))})
+    seen = events(monkeypatch)
+
+    market.purge_split_history(["ALT"], conn, today=dt.date(2026, 8, 28))
+
+    assert seen["start"] == dt.date(2026, 8, 28) - dt.timedelta(days=market.INITIAL_SPLIT_LOOKBACK_DAYS)
+
+
+def test_a_failed_query_keeps_the_cache_and_the_warning(conn, monkeypatch):
+    """Nichts loeschen, nichts vermerken: der naechste Lauf sieht den Split erneut."""
+    store.save_bars(conn, {"AAA": bars_ending(dt.date(2026, 8, 27))})
+    events(monkeypatch, warning="Split-Abfrage fehlgeschlagen (403)")
+
+    purged, warning = market.purge_split_history(["AAA"], conn, today=dt.date(2026, 8, 28))
+
+    assert purged == []
+    assert warning == "Split-Abfrage fehlgeschlagen (403)"
+    assert store.last_bar_dates(conn) == {"AAA": dt.date(2026, 8, 27)}
+    assert store.recorded_splits(conn) == set()

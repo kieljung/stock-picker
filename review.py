@@ -29,7 +29,11 @@ def main() -> int:
         print("Ledger ist leer — noch nichts auszuwerten.")
         return 0
 
-    cutoff = dt.date.today() - dt.timedelta(days=args.days)
+    # Ein Tag mehr als das Fenster: erst dann ist die letzte Bar, die noch
+    # hineinfaellt, sicher da (siehe outcomes.window_expired). Wer frueher
+    # schneidet, wertet Picks mit unvollstaendigem Fenster aus und bekommt
+    # sie als OPEN zurueck -- also gar nicht in die Bilanz.
+    cutoff = dt.date.today() - dt.timedelta(days=args.days + 1)
     due = [e for e in entries if dt.date.fromisoformat(e["date"]) <= cutoff]
     if not due:
         print(f"Kein Eintrag ist aelter als {args.days} Tage. {len(entries)} Eintraege insgesamt.")
@@ -45,7 +49,7 @@ def main() -> int:
         if bars is None or bars.empty:
             print(f"  ! Keine Kursdaten fuer {entry['ticker']} ab {start}")
             continue
-        results.append(outcomes.evaluate(entry, bars))
+        results.append(outcomes.evaluate(entry, bars, hold_days=args.days))
 
     if not results:
         print("Zu keinem faelligen Eintrag gab es Kursdaten — nichts auszuwerten.")
@@ -55,8 +59,9 @@ def main() -> int:
 
     print(f"\n=== Auswertung ueber {len(results)} Picks, Fenster {args.days} Tage ===\n")
     overall = summary["overall"]
-    print(f"Gesamt: {overall['trades']} geschlossene Trades, "
+    print(f"Gesamt: {overall['trades']} abgerechnete Trades, "
           f"Trefferquote {overall['win_rate']}%, Erwartungswert {overall['expectancy_r']}R")
+    print(f"  davon per Zeitstopp abgerechnet: {summary['time_stop']}")
     print(f"Nicht ausgeloest: {summary['not_triggered']}  ·  Noch offen: {summary['open']}\n")
 
     print("Nach Setup:")

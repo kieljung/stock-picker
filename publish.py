@@ -56,6 +56,17 @@ def load_history(tickers: list[str], conn: sqlite3.Connection, *,
     if offline:
         return store.load_bars(conn, tickers)
 
+    # Dieselbe Split-Pruefung wie im Screener. Sie steht hier ein zweites Mal,
+    # weil der Sync auch an Tagen laeuft, an denen Stufe 1 gescheitert ist --
+    # und weil ein Split bei einem offenen Pick mehr kaputt macht als den
+    # Cache: die Levels im Ledger stehen dann in der alten Stueckelung.
+    purged, warning = market.purge_split_history(tickers, conn, verbose=True)
+    if warning:
+        print(f"WARNUNG: {warning}", file=sys.stderr)
+    if purged:
+        print(f"WARNUNG: Split bei {', '.join(purged)} — Historie wird neu geladen, "
+              f"Entry, Stop und Target stammen aber von vor dem Split.", file=sys.stderr)
+
     history, stats = market.get_history(tickers, conn, verbose=True)
     print(
         f"Kursdaten fuer {len(history)} von {len(tickers)} Titeln: "

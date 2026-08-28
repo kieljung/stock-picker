@@ -148,3 +148,37 @@ def test_meta_refresh_updates_the_timestamp(conn):
 def test_meta_ignores_tickers_not_asked_for(conn):
     store.save_meta(conn, {"AAA": {"market_cap": 1.0}, "BBB": {"market_cap": 2.0}})
     assert set(store.load_meta(conn, ["AAA"])) == {"AAA"}
+
+
+# --- Splits ----------------------------------------------------------------
+
+def test_delete_bars_removes_the_whole_history(conn):
+    store.save_bars(conn, {"AAA": make_ohlcv([10.0, 11.0, 12.0]),
+                           "BBB": make_ohlcv([10.0, 11.0, 12.0])})
+    assert store.delete_bars(conn, ["AAA"]) == 3
+    assert set(store.load_bars(conn, ["AAA", "BBB"])) == {"BBB"}
+
+
+def test_delete_bars_without_tickers_is_a_no_op(conn):
+    store.save_bars(conn, {"AAA": make_ohlcv([10.0])})
+    assert store.delete_bars(conn, []) == 0
+    assert set(store.load_bars(conn, ["AAA"])) == {"AAA"}
+
+
+def test_recorded_splits_round_trip(conn):
+    store.record_splits(conn, {("AAA", dt.date(2026, 8, 24)),
+                               ("BBB", dt.date(2026, 8, 20))})
+    assert store.recorded_splits(conn) == {("AAA", dt.date(2026, 8, 24)),
+                                           ("BBB", dt.date(2026, 8, 20))}
+
+
+def test_recording_the_same_split_twice_keeps_one_row(conn):
+    store.record_splits(conn, {("AAA", dt.date(2026, 8, 24))}, now=dt.datetime(2026, 8, 25))
+    store.record_splits(conn, {("AAA", dt.date(2026, 8, 24))}, now=dt.datetime(2026, 8, 26))
+    assert conn.execute("SELECT applied_at FROM splits").fetchall() == [("2026-08-25T00:00:00",)]
+
+
+def test_a_second_split_of_the_same_ticker_is_its_own_row(conn):
+    store.record_splits(conn, {("AAA", dt.date(2026, 8, 24))})
+    store.record_splits(conn, {("AAA", dt.date(2026, 9, 15))})
+    assert len(store.recorded_splits(conn)) == 2

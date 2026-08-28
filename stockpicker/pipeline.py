@@ -111,6 +111,28 @@ def _days_since(date: dt.date | None) -> int:
     return days if days >= 0 else NO_EARNINGS_KNOWN
 
 
+#: Platzhalter fuer das RS-Perzentil in _is_vcp_base. Hoch genug, um die
+#: RS-Bedingung des Templates zu erfuellen -- als einzige laesst sie sich hier
+#: noch nicht beantworten.
+RS_UNKNOWN_YET = 100.0
+
+
+def _is_vcp_base(f: dict) -> bool:
+    """Ob der Titel eine VCP-Basis bildet, soweit das jetzt schon feststeht.
+
+    Es sind exakt die Bedingungen aus ``templates.is_vcp_breakout``, nur ohne
+    das RS-Perzentil: die Hard-Filter laufen vor der Template-Erkennung und
+    muessen das auch, weil der Rang erst aus der Menge der Ueberlebenden
+    entsteht. Alle uebrigen Merkmale -- Stack, Basislaenge, Basistiefe,
+    Kontraktion, austrocknendes Volumen, Naehe zum Pivot -- stehen schon fest.
+
+    Bewusst der echte Matcher statt einer Handvoll nachgebauter Bedingungen:
+    zwei Definitionen einer VCP-Basis waeren zwei Definitionen, die
+    auseinanderlaufen koennen.
+    """
+    return templates.is_vcp_breakout({**f, "rs_percentile": RS_UNKNOWN_YET})
+
+
 def passes_hard_filters(f: dict, cfg: ScreenConfig = SCREEN) -> tuple[bool, str]:
     """Gibt (bestanden, Ablehnungsgrund) zurueck. Grund ist leer bei Erfolg."""
     if f["bars"] < cfg.min_history_days:
@@ -125,8 +147,9 @@ def passes_hard_filters(f: dict, cfg: ScreenConfig = SCREEN) -> tuple[bool, str]
     if cap is not None and not (cfg.min_market_cap <= cap <= cfg.max_market_cap):
         return False, f"Marktkap ausserhalb Range ({cap:,.0f} USD)"
     atr_pct = f.get("atr_pct")
-    if atr_pct is None or not (cfg.min_atr_pct <= atr_pct <= cfg.max_atr_pct):
-        return False, f"ATR% ausserhalb {cfg.min_atr_pct}-{cfg.max_atr_pct} ({atr_pct})"
+    floor = cfg.min_atr_pct_contracting if _is_vcp_base(f) else cfg.min_atr_pct
+    if atr_pct is None or not (floor <= atr_pct <= cfg.max_atr_pct):
+        return False, f"ATR% ausserhalb {floor}-{cfg.max_atr_pct} ({atr_pct})"
     days_to = f.get("days_to_earnings")
     if days_to is not None and 0 <= days_to <= cfg.earnings_blackout_days:
         return False, f"Earnings in {days_to} Tagen"
@@ -155,10 +178,49 @@ def _num(value) -> float:
 
 
 def select_candidates(features: list[dict], cfg: ScreenConfig = SCREEN) -> list[dict]:
-    """Behaelt Titel mit mindestens einem Template-Treffer, deckelt nach RS-Rang."""
+    """Behaelt Titel mit mindestens einem Template-Treffer, reihum je Template.
+
+    Die Templates kommen der Reihe nach dran, und jedes gibt seinen besten
+    verbliebenen Titel nach RS-Rang ab, bis der Deckel erreicht ist. Innerhalb
+    eines Templates entscheidet weiter allein die relative Staerke.
+
+    Vorher wurde nur nach RS sortiert und abgeschnitten. Das klingt neutral,
+    ist es aber nicht: welches Template im aktuellen Markt am haeufigsten
+    trifft, besetzt dann die ganze Liste. In den ersten zwoelf Laeufen waren
+    das 42 von 51 Picks TREND_PULLBACK und kein einziges VCP_BREAKOUT -- die
+    Auswertung nach Setup hatte damit nichts zu vergleichen, und was den
+    Deckel nie erreicht, kann sich auch nie als tragfaehig erweisen.
+
+    Der Preis ist bewusst in Kauf genommen: ein seltenes Template kann einen
+    Platz vor einem staerkeren TREND_PULLBACK bekommen. Die Kandidatenliste
+    ist ein Vorschlag, kein Pick -- Stufe 2 bewertet die Qualitaet, und die
+    Composite-Schwelle in validate.py faengt ab, was nicht traegt.
+    """
     matched = [f for f in features if f.get("templates")]
     matched.sort(key=lambda f: f.get("rs_percentile", 0.0), reverse=True)
-    return matched[: cfg.max_candidates]
+
+    pools = {name: [f for f in matched if name in f["templates"]]
+             for name in templates.TEMPLATE_NAMES}
+    selected: list[dict] = []
+    taken: set[int] = set()
+
+    while len(selected) < cfg.max_candidates:
+        before = len(selected)
+        for pool in pools.values():
+            while pool and id(pool[0]) in taken:
+                pool.pop(0)
+            if not pool or len(selected) >= cfg.max_candidates:
+                continue
+            candidate = pool.pop(0)
+            taken.add(id(candidate))
+            selected.append(candidate)
+        if len(selected) == before:      # kein Template hatte noch etwas
+            break
+
+    # Die Liste geht nach RS geordnet an das Modell. Die Quote entscheidet,
+    # wer drauf steht, nicht in welcher Reihenfolge er dort gelesen wird.
+    selected.sort(key=lambda f: f.get("rs_percentile", 0.0), reverse=True)
+    return selected
 
 
 def run_screen(
@@ -167,8 +229,18 @@ def run_screen(
     sectors: dict[str, str],
     benchmark_bars: pd.DataFrame,
     cfg: ScreenConfig = SCREEN,
+    open_positions: dict[str, str] | None = None,
 ) -> dict:
-    """Vollstaendiger Screen auf bereits geladenen Daten."""
+    """Vollstaendiger Screen auf bereits geladenen Daten.
+
+    ``open_positions`` bildet Ticker auf das Datum ihres noch laufenden Picks
+    ab. Sie fallen vor allen anderen Filtern heraus: was schon im Depot liegt,
+    ist heute keine Gelegenheit mehr, sondern eine zweite Position auf
+    dieselbe These. Das zu verhindern ist billiger, als es in Stufe 3
+    abzufangen -- ein Titel, den das Modell nie sieht, kostet keinen
+    abgebrochenen Lauf.
+    """
+    open_positions = open_positions or {}
     benchmark_close = benchmark_bars["Close"]
     benchmark_perf = {
         "1m": ind.performance_pct(benchmark_close, 21),
@@ -180,6 +252,11 @@ def run_screen(
     rejections: list[dict] = []
 
     for ticker, bars in history.items():
+        since = open_positions.get(ticker)
+        if since:
+            rejections.append({"ticker": ticker,
+                               "reason": f"Position vom {since} laeuft noch"})
+            continue
         ticker_meta = meta.get(ticker, {})
         try:
             f = compute_features(

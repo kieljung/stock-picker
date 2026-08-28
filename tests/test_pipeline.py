@@ -1,7 +1,7 @@
 import datetime as dt
 
 
-from stockpicker import pipeline
+from stockpicker import pipeline, templates
 from stockpicker.config import ScreenConfig
 from tests.conftest import make_ohlcv
 
@@ -174,3 +174,135 @@ def test_run_screen_summary_counts_all_rejections_not_just_first_fifty():
 
     assert len(result["rejections"]) == 50
     assert result["rejection_summary"]["Kurs ausserhalb 3.0-100.0 USD"] == 60
+
+
+# --- Template-Quote ---------------------------------------------------------
+# Vorher entschied allein der RS-Rang, wer auf die Kandidatenliste kommt. Das
+# ueberlaesst die Liste dem Template, das im aktuellen Markt am haeufigsten
+# trifft -- in den ersten zwoelf Laeufen 42 von 51 Picks TREND_PULLBACK und
+# kein einziges VCP_BREAKOUT.
+
+def _feature(ticker, rs, templates_):
+    return {"ticker": ticker, "rs_percentile": rs, "templates": templates_}
+
+
+def test_select_candidates_gives_every_template_a_turn():
+    features = [_feature(f"TP{i}", 90 - i, ["TREND_PULLBACK"]) for i in range(10)]
+    features.append(_feature("MR", 20.0, ["MEAN_REVERSION"]))
+    cfg = ScreenConfig(max_candidates=3)
+
+    picked = {f["ticker"] for f in pipeline.select_candidates(features, cfg)}
+    # Der schwache MEAN_REVERSION kommt mit, obwohl zehn Titel besseren RS
+    # haben: sonst waere das Setup nie auswertbar.
+    assert "MR" in picked
+    assert len(picked) == 3
+
+
+def test_select_candidates_orders_by_rs_within_a_template():
+    features = [_feature("LOW", 40.0, ["TREND_PULLBACK"]),
+                _feature("HIGH", 95.0, ["TREND_PULLBACK"])]
+    picked = pipeline.select_candidates(features, ScreenConfig(max_candidates=1))
+    assert [f["ticker"] for f in picked] == ["HIGH"]
+
+
+def test_select_candidates_fills_the_cap_from_one_template_if_alone():
+    features = [_feature(f"TP{i}", 90 - i, ["TREND_PULLBACK"]) for i in range(10)]
+    picked = pipeline.select_candidates(features, ScreenConfig(max_candidates=4))
+    assert len(picked) == 4
+
+
+def test_select_candidates_never_picks_a_title_twice():
+    # Ein Titel kann mehrere Templates treffen und darf trotzdem nur einen
+    # Platz belegen.
+    features = [_feature("BOTH", 90.0, ["VCP_BREAKOUT", "TREND_PULLBACK"]),
+                _feature("TP", 80.0, ["TREND_PULLBACK"])]
+    picked = pipeline.select_candidates(features, ScreenConfig(max_candidates=5))
+    assert [f["ticker"] for f in picked] == ["BOTH", "TP"]
+
+
+def test_select_candidates_skips_titles_without_a_template():
+    features = [_feature("NONE", 99.0, []), _feature("TP", 50.0, ["TREND_PULLBACK"])]
+    picked = pipeline.select_candidates(features, ScreenConfig(max_candidates=5))
+    assert [f["ticker"] for f in picked] == ["TP"]
+
+
+# --- ATR-Boden gegen die VCP-Basis ------------------------------------------
+# Der Boden von 3 % soll tote Titel aussortieren. Er traf aber auch das VCP,
+# das sich gerade ueber die schrumpfende Spanne definiert: an einem gemessenen
+# Tag scheiterten drei der acht VCP-Treffer im Universum genau daran.
+
+def _liquid(**overrides):
+    """Ein Titel, der alle Hard-Filter ausser dem ATR-Boden sicher passiert.
+
+    Die Vorgabe ist bewusst *keine* VCP-Basis -- die Basis ist zu kurz und das
+    Volumen trocknet nicht aus. Wer sie testen will, schaltet sie mit
+    ``_vcp_base()`` ein.
+    """
+    base = {"bars": 300, "close": 50.0, "avg_volume_20d": 1_000_000,
+            "dollar_volume": 50_000_000.0, "market_cap": 1_000_000_000.0,
+            "atr_pct": 5.0, "days_to_earnings": None,
+            "sma20": 49.0, "sma50": 48.0, "sma200": 40.0,
+            "base_length": 5, "base_depth_pct": 20.0,
+            "range_contraction": 1.0, "volume_dryup": False,
+            "distance_to_pivot_pct": -20.0}
+    return {**base, **overrides}
+
+
+def _vcp_base(**overrides):
+    """Wie _liquid, aber mit allen VCP-Merkmalen ausser dem RS-Perzentil."""
+    return _liquid(**{"base_length": 20, "base_depth_pct": 25.0,
+                      "range_contraction": 0.5, "volume_dryup": True,
+                      "distance_to_pivot_pct": -2.0, **overrides})
+
+
+def test_quiet_title_without_a_base_still_fails_the_atr_floor():
+    ok, reason = pipeline.passes_hard_filters(_liquid(atr_pct=1.7))
+    assert not ok
+    assert "ATR%" in reason
+
+
+def test_vcp_base_passes_the_lower_atr_floor():
+    ok, _ = pipeline.passes_hard_filters(_vcp_base(atr_pct=1.7))
+    assert ok
+
+
+def test_the_lower_floor_needs_the_whole_base_not_just_the_contraction():
+    # Enge Spanne und trockenes Volumen allein genuegen nicht -- ohne Basis
+    # von 15 Bars und ohne Naehe zum Pivot ist es kein VCP, sondern ein
+    # ruhiger Titel.
+    ok, reason = pipeline.passes_hard_filters(
+        _liquid(atr_pct=1.7, volume_dryup=True, range_contraction=0.5))
+    assert not ok
+    assert "ATR%" in reason
+
+
+def test_base_does_not_rescue_a_dead_title():
+    ok, reason = pipeline.passes_hard_filters(_vcp_base(atr_pct=0.6))
+    assert not ok
+    assert "ATR%" in reason
+
+
+def test_base_does_not_lift_the_atr_ceiling():
+    ok, reason = pipeline.passes_hard_filters(_vcp_base(atr_pct=15.0))
+    assert not ok
+    assert "ATR%" in reason
+
+
+def test_base_test_matches_the_template_apart_from_rs():
+    # Die Ausnahme darf nicht weiter greifen als das Template selbst.
+    base = _vcp_base()
+    assert templates.is_vcp_breakout({**base, "rs_percentile": 95.0})
+    assert not templates.is_vcp_breakout({**_liquid(), "rs_percentile": 95.0})
+
+
+# --- Laufende Positionen ----------------------------------------------------
+
+def test_run_screen_drops_titles_with_a_live_position():
+    history = {"AAA": uptrend_bars(), "BBB": uptrend_bars()}
+    result = pipeline.run_screen(
+        history, {}, {"AAA": "Health Care", "BBB": "Health Care"},
+        uptrend_bars(), open_positions={"AAA": "2026-08-20"})
+
+    assert "AAA" not in {c["ticker"] for c in result["candidates"]}
+    reasons = {r["ticker"]: r["reason"] for r in result["rejections"]}
+    assert "2026-08-20" in reasons["AAA"]

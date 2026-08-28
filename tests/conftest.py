@@ -52,10 +52,11 @@ def isolate_from_local_credentials(monkeypatch, tmp_path):
     Alpha-Vantage-Key oder ein Portal-Zugang liegt -- die Suite waere bei dir
     gruen und in CI rot.
     """
-    from stockpicker import earnings, publish
+    from stockpicker import earnings, publish, splits
 
     for name in ("ALPHAVANTAGE_API_KEY", "FINNHUB_API_KEY",
+                 "ALPACA_API_KEY", "ALPACA_SECRET_KEY",
                  "PORTAL_URL", "PORTAL_USER", "PORTAL_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
-    for module in (earnings, publish):
+    for module in (earnings, publish, splits):
         monkeypatch.setattr(module, "DOTENV", tmp_path / "absent.env")

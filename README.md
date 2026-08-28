@@ -150,10 +150,23 @@ Alles landet zusätzlich in `logs/YYYY-MM-DD.log`, 30 Tage lang.
 Die Arbeitsteilung folgt der Fehleranfälligkeit: Zahlen berechnet Code, Kontext
 bewertet das Modell, und die halluzinationsanfälligste Stelle — konkrete
 Kursniveaus — wird maschinell gegengeprüft. `validate.py` bricht ab, wenn ein
-Stop über dem Entry liegt, das Chance-Risiko-Verhältnis unter 2:1 fällt oder ein
-Entry mehr als 15 % vom letzten Schlusskurs abweicht. Dieselben Regeln laufen
+Stop über dem Entry liegt, das Chance-Risiko-Verhältnis unter 2:1 fällt, ein
+Entry mehr als 15 % vom letzten Schlusskurs abweicht oder ein Titel ein zweites
+Mal gepickt wird, während seine Position noch läuft. Dieselben Regeln laufen
 im Portal ein zweites Mal, bevor ein Report in die Datenbank geht — die API ist
 nicht darauf angewiesen, dass der Absender schon geprüft hat.
+
+### Ein Titel, eine Position
+
+Solange das Beobachtungsfenster eines Picks läuft, ist derselbe Titel keine
+neue Gelegenheit, sondern eine zweite Position auf dieselbe These. `screen.py`
+nimmt laufende Positionen deshalb aus der Kandidatenliste, bevor das Modell sie
+sieht; `validate.py` prüft dieselbe Regel noch einmal, für den Fall, dass die
+Kandidatenliste nicht vom heutigen Lauf stammt.
+
+Prävention statt Abbruch: ein Titel, den das Modell nie sieht, kostet keinen
+Lauf. Der Backstop in Stufe 3 nennt den Grund beim Namen, statt ihn als „nicht
+in der Kandidatenliste" zu tarnen.
 
 Details in `docs/plans/2026-08-09-swing-trade-prompt-design.md`.
 
@@ -272,6 +285,57 @@ Fundamentaldaten gelten fünf Tage als frisch — Marktkapitalisierung und Short
 Float bewegen sich nicht so schnell, dass es für Grenzen bei 300 Mio und 3 Mrd
 USD eine Rolle spielt. Earnings-Termine kommen aus den Kalendern und haben ihren
 eigenen Tages-Cache.
+
+### Splits — die Bruchstelle des Delta-Ladens
+
+Genau das Nachladen, das den Cache schnell macht, macht ihn bei einem Split
+falsch. yfinance rechnet seine Historie rückwirkend um; der Cache hält die alte
+Stückelung und bekommt die neue angehängt. Danach steht beides in derselben
+Reihe, ohne dass man es der Tabelle ansieht:
+
+```
+BRCC   2026-08-21   0,88 USD      ← vor dem 1:10-Reverse-Split
+BRCC   2026-08-25   8,55 USD      ← danach
+```
+
+Ein Sprung um den Split-Faktor ist von einem Kurssprung nicht zu unterscheiden.
+Jeder gleitende Durchschnitt darüber ist Fiktion, und der Preisfilter dreht sich
+um: vor dem Split lag BRCC unter `min_price`, danach darüber — mit einem
+Zehnfach-„Ausbruch" in der Historie. Am 28.08.2026 traf das vier Titel im
+Universum: BRCC, REAX, SFBS und WLFC.
+
+`screen.py` und `publish.py --sync` fragen deshalb vor jedem Laden Alpacas
+Corporate-Actions-Endpunkt nach Ex-Daten und **verwerfen** die Historie
+betroffener Titel, statt sie zu ergänzen. Der Titel gilt danach als unbekannt
+und wird voll neu geladen — durchgehend in einer Stückelung. Verarbeitete
+Splits stehen in der Tabelle `splits`; ohne dieses Gedächtnis würde derselbe
+Split jeden Tag aufs Neue zwei Jahre Historie ziehen.
+
+```bash
+cat >> .env <<'KEYS'
+ALPACA_API_KEY=dein-key
+ALPACA_SECRET_KEY=dein-secret
+KEYS
+```
+
+Ein Paper-Account genügt — abgefragt wird nur die Market-Data-API. Alpaca ist
+hier Datenquelle, kein Broker-Anschluss: es wird nichts geordert (siehe
+„Bewusst nicht enthalten").
+
+Ohne Keys läuft alles weiter, aber `screen.py` meldet in jedem Lauf, dass die
+Prüfung ausfällt — und `candidates.json` trägt die Warnung mit. Ein stiller
+Ausfall wäre hier besonders teuer, weil ein unbemerkter Split nicht wie ein
+Fehler aussieht, sondern wie ein Treffer.
+
+Zwei Grenzen bleiben:
+
+- Der Endpunkt kennt Splits, keine **ADR-Ratio-Änderungen**. ACH hat sich am
+  10.08.2026 sauber halbiert, ohne dass eine Corporate Action das meldet — im
+  Cache sieht das aus wie ein Split und wird nicht bereinigt.
+- Der Cache lässt sich neu laden, der **Ledger nicht**. Entry, Stop und Target
+  eines laufenden Picks stehen in der alten Stückelung und passen nach einem
+  Split zu keinem Kurs mehr. Beide Skripte warnen, wenn ein bereinigter Titel
+  eine offene Position hat; korrigieren muss man den Eintrag von Hand.
 
 ## Portal
 
@@ -399,6 +463,36 @@ Nach etwa 30 Läufen zeigt `review.py`, welche der vier Templates tatsächlich
 tragen. Die Gewichtung wird dann in `PROMPT.md` angepasst — Block 5, nicht im
 Code. `data/ledger.jsonl` ist deshalb versioniert: er ist das Gedächtnis des
 Systems.
+
+Damit die Auswertung überhaupt etwas zu vergleichen hat, braucht jedes Template
+Einträge im Ledger. `select_candidates` lässt die Templates deshalb reihum
+antreten, statt allein nach RS-Rang zu deckeln — sonst besetzt das Template,
+das im aktuellen Markt am häufigsten trifft, die ganze Liste, und was den
+Deckel nie erreicht, kann sich auch nie als tragfähig erweisen.
+
+Aus demselben Grund gibt es zum ATR-Boden von 3 % einen zweiten, tieferen von
+1,5 % — ausschließlich für Titel, die eine VCP-Basis bilden. Der Boden soll
+tote Titel aussortieren, traf aber auch das VCP, das sich gerade über die
+schrumpfende Spanne definiert: an einem gemessenen Tag scheiterten drei der
+acht VCP-Treffer im Universum genau daran. Geprüft wird mit
+`templates.is_vcp_breakout` selbst, nur ohne das RS-Perzentil — das entsteht
+erst aus der Menge derer, die die Hard-Filter überlebt haben.
+
+### Was als Trade zählt
+
+Ein Pick, der weder Stop noch Target 1 berührt, wird nach `hold_days_max` zum
+Schlusskurs abgerechnet (`TIME_STOP`) und zählt wie jeder andere Trade. Das ist
+keine Kosmetik: der Stop liegt im Median rund 1,5 ATR vom Entry entfernt,
+Target 1 rund 3 ATR. Im Fenster von zehn Tagen löst der Stop deshalb deutlich
+häufiger auf als das Ziel. Zählte nur, was einen der beiden Punkte berührt hat,
+blieben die zähen Gewinner als „offen" liegen und die Bilanz zeigte
+systematisch zu viel Verlust — bei den ersten 51 Picks war der Unterschied
+-0,57R gegenüber -0,13R.
+
+Gewinner ist entsprechend, wer im Plus abgerechnet wurde, nicht nur, wer
+Target 1 erreicht hat. `outcomes.TRADE_STATUS` und `CLOSED_STATUS` in
+`portal/htdocs/lib/repo.php` müssen dabei dasselbe sagen, sonst widerspricht
+das Portal dem Terminal.
 
 ## Bewusst nicht enthalten
 

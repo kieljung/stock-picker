@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS meta (
     next_earnings          TEXT,
     last_earnings          TEXT
 );
+
+-- Verarbeitete Splits. Kein Kursdatum, sondern ein Gedaechtnis: ein Eintrag
+-- heisst, dass die Historie dieses Titels nach dem Ex-Datum neu geladen wurde.
+-- Ohne ihn wuerde derselbe Split jeden Tag erneut eine Vollladung ausloesen.
+CREATE TABLE IF NOT EXISTS splits (
+    ticker     TEXT NOT NULL,
+    ex_date    TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    PRIMARY KEY (ticker, ex_date)
+);
 """
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
@@ -116,6 +126,53 @@ def load_bars(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, pd.Data
         frame.index.name = None
         out[ticker] = frame
     return out
+
+
+def delete_bars(conn: sqlite3.Connection, tickers: list[str]) -> int:
+    """Verwirft die gesamte Historie der genannten Titel.
+
+    Loeschen und nicht ueberschreiben: der Titel faellt danach in
+    ``get_history`` in den Zweig fuer unbekannte Ticker und wird als volle
+    Historie neu geladen. Ein Upsert wuerde nur die Tage anfassen, die die
+    neue Antwort enthaelt, und den Rest in der alten Stueckelung stehen lassen.
+    """
+    if not tickers:
+        return 0
+    cursor = conn.executemany("DELETE FROM bars WHERE ticker = ?",
+                              [(ticker,) for ticker in tickers])
+    conn.commit()
+    return cursor.rowcount
+
+
+# --------------------------------------------------------------------------
+# Splits
+# --------------------------------------------------------------------------
+
+def record_splits(conn: sqlite3.Connection, events, *, now: dt.datetime | None = None) -> int:
+    """Merkt sich verarbeitete Splits als (Ticker, Ex-Datum).
+
+    Ein bereits bekanntes Paar bleibt unveraendert -- der Zeitstempel nennt
+    den Lauf, der die Historie tatsaechlich neu geholt hat.
+    """
+    rows = [(ticker, _iso(ex_date), (now or dt.datetime.now()).isoformat(timespec="seconds"))
+            for ticker, ex_date in events]
+    if not rows:
+        return 0
+    conn.executemany(
+        "INSERT INTO splits (ticker, ex_date, applied_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(ticker, ex_date) DO NOTHING",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def recorded_splits(conn: sqlite3.Connection) -> set[tuple[str, dt.date]]:
+    """Alle schon verarbeiteten Splits."""
+    return {
+        (ticker, dt.date.fromisoformat(ex_date))
+        for ticker, ex_date in conn.execute("SELECT ticker, ex_date FROM splits")
+    }
 
 
 # --------------------------------------------------------------------------

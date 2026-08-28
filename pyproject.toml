@@ -8,6 +8,7 @@ dependencies = [
     "pandas>=2.2",
     "numpy>=1.26",
     "requests>=2.31",
+    "alpaca-py>=0.44.0",
 ]
 
 [dependency-groups]

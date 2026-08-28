@@ -15,11 +15,18 @@ from collections import defaultdict
 
 import pandas as pd
 
-from stockpicker import fetch, store
+from stockpicker import fetch, splits, store
 
 # Ueberlappung beim Delta-Laden: deckt lange Wochenenden, Feiertage und
 # nachtraegliche Korrekturen ab, ohne die volle Historie zu ziehen.
 DELTA_OVERLAP_DAYS = 5
+
+#: Wie weit die erste Split-Pruefung zurueckschaut. Danach genuegt das Fenster
+#: seit dem letzten Lauf -- was davor liegt, steht in der Tabelle ``splits``.
+#: Beim ersten Mal ist die leer, der Cache haelt aber schon Historie: 90 Tage
+#: decken seine bisherige Lebensdauer ab, ohne jeden Split der letzten zwei
+#: Jahre einzusammeln und dafuer halbe Universen neu zu laden.
+INITIAL_SPLIT_LOOKBACK_DAYS = 90
 
 
 def last_expected_session(today: dt.date) -> dt.date:
@@ -32,6 +39,61 @@ def last_expected_session(today: dt.date) -> dt.date:
     while today.weekday() >= 5:      # 5 = Samstag, 6 = Sonntag
         today -= dt.timedelta(days=1)
     return today
+
+
+def purge_split_history(
+    tickers: list[str],
+    conn: sqlite3.Connection,
+    *,
+    today: dt.date | None = None,
+    verbose: bool = False,
+) -> tuple[list[str], str]:
+    """Verwirft die Historie aller Titel, bei denen seit dem letzten Lauf ein Split lag.
+
+    Der Delta-Lauf in ``get_history`` haengt neue Bars an alte an. Nach einem
+    Split passt beides nicht mehr zusammen, weil yfinance die Historie
+    rueckwirkend umrechnet, der Cache sie aber in der alten Stueckelung haelt.
+    Wer nur nachlaedt, bekommt eine Reihe mit einem Sprung um den Split-Faktor
+    darin -- und der ist von einem Kurssprung nicht zu unterscheiden.
+
+    Deshalb loeschen statt ergaenzen: der bereinigte Titel gilt danach als
+    unbekannt und wird als volle Historie neu geladen, durchgehend in
+    derselben Stueckelung.
+
+    Rueckgabe sind die bereinigten Titel und eine Warnung, die leer bleibt,
+    solange die Abfrage funktioniert hat. Faellt sie aus, wird nichts
+    geloescht und nichts vermerkt -- der naechste Lauf sieht denselben Split
+    erneut.
+    """
+    today = today or dt.date.today()
+    known = store.last_bar_dates(conn)
+    cached = {t: known[t] for t in tickers if t in known}
+    if not cached:
+        # Ohne Historie gibt es nichts zu invalidieren: was gleich geladen
+        # wird, kommt ohnehin in einer einzigen Stueckelung.
+        return [], ""
+
+    seen = store.recorded_splits(conn)
+    horizon = today - dt.timedelta(days=INITIAL_SPLIT_LOOKBACK_DAYS)
+    start = max(min(cached.values()) - dt.timedelta(days=DELTA_OVERLAP_DAYS), horizon) \
+        if seen else horizon
+
+    events, warning = splits.load_splits(start, today)
+    wanted = set(tickers)
+    fresh = {(ticker, ex_date) for ticker, ex_date in events if ticker in wanted} - seen
+    affected = sorted({ticker for ticker, _ in fresh if ticker in cached})
+
+    if affected:
+        if verbose:
+            print(f"  Split seit dem letzten Lauf bei {len(affected)} Titeln — "
+                  f"Historie wird verworfen: {', '.join(affected)}")
+        store.delete_bars(conn, affected)
+
+    # Auch Splits von Titeln ohne Cache werden vermerkt: deren Historie kommt
+    # gleich frisch und damit bereits angepasst. Ohne den Vermerk wuerde
+    # derselbe Split sie am naechsten Tag einmal umsonst neu laden.
+    store.record_splits(conn, fresh)
+    return affected, warning
 
 
 def get_history(

@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 
 import pytest
@@ -136,3 +137,58 @@ def test_replace_keeps_entries_of_other_dates(tmp_path):
     ledger.append_entries(path, "2026-08-09", [good_pick(entry=44.0)], replace=True)
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [line["date"] for line in lines] == ["2026-08-08", "2026-08-09"]
+
+
+# --- Wiedereinstieg in eine laufende Position --------------------------------
+# 51 Picks aus zwoelf Laeufen entfielen auf 33 Ticker. ACHC wurde dreimal
+# gepickt und zweimal ausgestoppt, wobei der zweite und dritte Einstieg
+# entstanden, waehrend der erste offen und im Minus lag: aus einer These
+# wurden drei Positionen und zwei Verluste.
+
+LIVE_LEDGER = [
+    {"ticker": "ACHC", "date": "2026-08-10"},
+    {"ticker": "ACHC", "date": "2026-08-11"},
+    {"ticker": "OLD", "date": "2026-07-01"},
+]
+
+
+def test_live_positions_keeps_only_unexpired_windows():
+    live = ledger.live_positions(LIVE_LEDGER, dt.date(2026, 8, 18))
+    assert live == {"ACHC": "2026-08-11"}
+
+
+def test_live_positions_prefers_the_youngest_entry():
+    # Der juengste Pick verlaengert das Fenster am weitesten.
+    live = ledger.live_positions(LIVE_LEDGER, dt.date(2026, 8, 20))
+    assert live["ACHC"] == "2026-08-11"
+
+
+def test_live_positions_is_empty_once_every_window_expired():
+    assert ledger.live_positions(LIVE_LEDGER, dt.date(2026, 9, 1)) == {}
+
+
+def test_validate_report_rejects_a_reentry_into_a_live_position():
+    picks = [good_pick(ticker="ACHC")]
+    candidates = [dict(CANDIDATE, ticker="ACHC")]
+    errors = ledger.validate_report(picks, candidates, TradeConfig(),
+                                    open_positions={"ACHC": "2026-08-10"})
+    assert any("2026-08-10" in e and "Wiedereinstieg" in e for e in errors)
+
+
+def test_validate_report_allows_a_ticker_without_a_live_position():
+    picks = [good_pick(ticker="ACHC")]
+    candidates = [dict(CANDIDATE, ticker="ACHC")]
+    assert ledger.validate_report(picks, candidates, TradeConfig(),
+                                  open_positions={"OTHER": "2026-08-10"}) == []
+
+
+def test_validate_report_without_open_positions_stays_valid():
+    # Aufrufer ohne Ledger -- die Pruefung entfaellt, statt zu scheitern.
+    picks = [good_pick(ticker="ACHC")]
+    assert ledger.validate_report(picks, [dict(CANDIDATE, ticker="ACHC")], TradeConfig()) == []
+
+
+def test_validate_report_rejects_the_same_ticker_twice_in_one_report():
+    picks = [good_pick(ticker="ACHC"), good_pick(ticker="ACHC")]
+    errors = ledger.validate_report(picks, [dict(CANDIDATE, ticker="ACHC")], TradeConfig())
+    assert any("2-mal im selben Report" in e for e in errors)

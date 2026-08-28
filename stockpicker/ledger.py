@@ -6,10 +6,12 @@ Gedaechtnis des Systems wandern.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from collections import Counter
 from pathlib import Path
 
+from stockpicker import outcomes
 from stockpicker.config import TRADE, TradeConfig
 
 MAX_ENTRY_DEVIATION_PCT = 15.0
@@ -81,13 +83,60 @@ def warn_pick(pick: dict, candidate: dict, cfg: TradeConfig = TRADE) -> list[str
     return warnings
 
 
-def validate_report(picks: list[dict], candidates: list[dict], cfg: TradeConfig = TRADE) -> list[str]:
-    """Regeln, die den Report als Ganzes betreffen."""
+def live_positions(entries: list[dict], on: dt.date,
+                   cfg: TradeConfig = TRADE) -> dict[str, str]:
+    """Ticker, deren Position am Tag ``on`` noch laeuft, mit ihrem Pick-Datum.
+
+    Lebendig heisst: das Beobachtungsfenster aus ``hold_days_max`` ist noch
+    nicht abgelaufen -- dieselbe Grenze, an der outcomes.evaluate einen Pick
+    per Zeitstopp abrechnet. Steht ein Ticker mehrfach im Ledger, gewinnt der
+    juengste Eintrag; er verlaengert das Fenster am weitesten.
+    """
+    live: dict[str, str] = {}
+    for entry in entries:
+        date = entry.get("date")
+        ticker = entry.get("ticker")
+        if not date or not ticker:
+            continue
+        if outcomes.window_expired(date, cfg.hold_days_max, as_of=on):
+            continue
+        if date > live.get(ticker, ""):
+            live[ticker] = date
+    return live
+
+
+def validate_report(picks: list[dict], candidates: list[dict], cfg: TradeConfig = TRADE,
+                    open_positions: dict[str, str] | None = None) -> list[str]:
+    """Regeln, die den Report als Ganzes betreffen.
+
+    ``open_positions`` bildet Ticker auf das Datum ihres noch laufenden Picks
+    ab (siehe ``live_positions``). Ohne die Angabe entfaellt die Pruefung --
+    Aufrufer ohne Ledger, etwa die Tests, bleiben damit gueltig.
+    """
     errors: list[str] = []
     by_ticker = {c["ticker"]: c for c in candidates}
+    open_positions = open_positions or {}
 
     if len(picks) > cfg.max_picks:
         errors.append(f"Report enthaelt {len(picks)} Titel — mehr als erlaubte {cfg.max_picks}")
+
+    # Derselbe Titel zweimal ist keine zweite Gelegenheit, sondern die doppelte
+    # Position auf dieselbe These -- einmal innerhalb des Reports, einmal gegen
+    # die noch laufenden Picks frueherer Tage. In den ersten zwoelf Laeufen
+    # entfielen 51 Picks auf 33 Ticker; ACHC wurde dreimal gepickt und zweimal
+    # ausgestoppt, wobei der zweite und dritte Einstieg entstanden, waehrend
+    # der erste offen und im Minus lag.
+    for ticker, count in Counter(p.get("ticker") for p in picks).items():
+        if count > 1:
+            errors.append(f"{ticker}: {count}-mal im selben Report")
+
+    for pick in picks:
+        since = open_positions.get(pick.get("ticker"))
+        if since:
+            errors.append(
+                f"{pick['ticker']}: Position vom {since} laeuft noch "
+                f"(Fenster {cfg.hold_days_max} Tage) — kein Wiedereinstieg"
+            )
 
     sector_counts = Counter(p.get("sector", "Unknown") for p in picks)
     for sector, count in sector_counts.items():

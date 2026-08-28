@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pytest
 
 from stockpicker import outcomes
@@ -9,6 +11,11 @@ ENTRY_PICK = {
     "entry": 100.0, "stop": 95.0, "target1": 110.0, "target2": 120.0,
     "score_catalyst": 7,
 }
+
+# ENTRY_PICK ist auf den 2026-07-20 datiert, das Fenster von hold_days_max=10
+# endet damit am 2026-07-30.
+INSIDE_WINDOW = dt.date(2026, 7, 25)
+AFTER_WINDOW = dt.date(2026, 7, 31)
 
 
 def bars_from(highs, lows):
@@ -46,8 +53,9 @@ def test_same_day_stop_and_target_counts_as_stop():
 
 
 def test_still_open_when_neither_level_reached():
+    # Mitten im Fenster: der Trade laeuft noch und zaehlt nicht in der Bilanz.
     bars = bars_from(highs=[101, 103, 104], lows=[99, 100, 101])
-    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3)
+    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3, as_of=INSIDE_WINDOW)
     assert result["status"] == "OPEN"
 
 
@@ -83,6 +91,57 @@ def test_summarize_ignores_not_triggered_and_open():
     assert summary["open"] == 1
 
 
+# --- Zeitstopp --------------------------------------------------------------
+# Der Stop liegt naeher am Entry als das Ziel; im Fenster loest er deshalb
+# haeufiger auf. Zaehlte nur, was einen der beiden Punkte beruehrt hat, fiele
+# der zaehe Gewinner als "offen" aus der Bilanz und der schnelle Verlust nicht.
+
+def test_expired_window_is_settled_at_the_last_close():
+    bars = bars_from(highs=[101, 103, 104], lows=[99, 100, 101])
+    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3, as_of=AFTER_WINDOW)
+    assert result["status"] == "TIME_STOP"
+    # Schlusskurs der letzten Bar ist 101, Risiko 5 -> +0.2R
+    assert result["r_multiple"] == pytest.approx(0.2)
+    assert result["closed_on"] == "2026-07-23"
+
+
+def test_time_stop_counts_as_a_trade():
+    results = [
+        {"setup": "PEAD", "status": "TIME_STOP", "r_multiple": 0.2, "score_catalyst": 5},
+        {"setup": "PEAD", "status": "STOP", "r_multiple": -1.0, "score_catalyst": 5},
+    ]
+    summary = outcomes.summarize(results)
+    assert summary["by_setup"]["PEAD"]["trades"] == 2
+    assert summary["time_stop"] == 1
+    assert summary["open"] == 0
+
+
+def test_positive_time_stop_counts_as_a_win():
+    # Ohne Target 1 beruehrt zu haben: im Plus abgerechnet ist ein Treffer.
+    results = [{"setup": "PEAD", "status": "TIME_STOP", "r_multiple": 0.4,
+                "score_catalyst": 5}]
+    assert outcomes.summarize(results)["overall"]["win_rate"] == pytest.approx(100.0)
+
+
+def test_time_stop_at_exactly_zero_is_a_trade_but_no_win():
+    results = [{"setup": "PEAD", "status": "TIME_STOP", "r_multiple": 0.0,
+                "score_catalyst": 5}]
+    overall = outcomes.summarize(results)["overall"]
+    assert overall["trades"] == 1
+    assert overall["win_rate"] == pytest.approx(0.0)
+
+
+def test_window_expires_a_day_after_the_last_possible_bar():
+    # Die letzte Bar des Fensters liegt auf 2026-07-30. An dem Tag selbst kann
+    # sie noch fehlen -- der Sync laeuft morgens.
+    assert not outcomes.window_expired("2026-07-20", 10, dt.date(2026, 7, 30))
+    assert outcomes.window_expired("2026-07-20", 10, dt.date(2026, 7, 31))
+
+
+def test_pick_without_date_never_expires():
+    assert not outcomes.window_expired(None, 10, dt.date(2030, 1, 1))
+
+
 def test_summarize_groups_by_catalyst_bucket():
     results = [
         {"setup": "PEAD", "status": "TARGET1", "r_multiple": 2.0, "score_catalyst": 9},
@@ -114,7 +173,7 @@ def test_stop_reports_the_bar_that_closed_the_trade():
 
 def test_open_trade_has_a_trigger_date_but_no_close_date():
     bars = bars_from(highs=[101, 103, 104], lows=[99, 100, 101])
-    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3)
+    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3, as_of=INSIDE_WINDOW)
     assert result["status"] == "OPEN"
     assert result["triggered_on"] == "2026-07-21"
     assert result["closed_on"] is None

@@ -14,6 +14,12 @@ class ScreenConfig:
     max_market_cap: float = 3_000_000_000.0
     min_atr_pct: float = 3.0
     max_atr_pct: float = 12.0
+    # Ein zweiter, tieferer ATR-Boden -- ausschliesslich fuer Titel, die eine
+    # VCP-Basis bilden. Der normale Boden von 3 % soll tote Titel aussortieren,
+    # traf aber auch das VCP, das sich gerade ueber die schrumpfende Spanne
+    # definiert. Eine Basis mit austrocknendem Volumen ist nicht tot, sondern
+    # gespannt; unter 1,5 % ist sie es doch.
+    min_atr_pct_contracting: float = 1.5
     min_history_days: int = 250
 
     # Earnings-Regel
