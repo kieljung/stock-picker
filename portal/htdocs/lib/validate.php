@@ -10,7 +10,7 @@
 // MAX_ENTRY_DEVIATION_PCT in stockpicker/ledger.py.
 const MAX_ENTRY_DEVIATION_PCT = 15.0;
 
-const MIN_RISK_REWARD    = 2.0;
+const MIN_RISK_REWARD    = 1.5;
 const MIN_COMPOSITE      = 60;
 const MAX_PICKS          = 5;
 const MAX_PER_SECTOR     = 2;

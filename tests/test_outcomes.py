@@ -21,7 +21,10 @@ AFTER_WINDOW = dt.date(2026, 7, 31)
 def bars_from(highs, lows):
     import pandas as pd
     idx = pd.bdate_range(start="2026-07-21", periods=len(highs))
-    return pd.DataFrame({"Open": lows, "High": highs, "Low": lows, "Close": lows}, index=idx)
+    # Eroeffnung in der Mitte der Spanne: keine Bar springt ueber einen Level,
+    # die Gap-Fuellung bleibt den Tests ueberlassen, die sie ausdruecklich setzen.
+    opens = [(h + l) / 2 for h, l in zip(highs, lows)]
+    return pd.DataFrame({"Open": opens, "High": highs, "Low": lows, "Close": lows}, index=idx)
 
 
 def test_not_triggered_when_price_never_reaches_entry():
@@ -43,6 +46,25 @@ def test_stop_hit_before_target_yields_minus_one_r():
     result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3)
     assert result["status"] == "STOP"
     assert result["r_multiple"] == pytest.approx(-1.0)
+
+
+def test_gap_above_entry_fills_at_the_open():
+    # Stop-Buy bei 100, Eroeffnung bei 102: gefuellt wird zu 102, und das
+    # Ziel bei 110 bringt nur noch (110 - 102) / 5 = 1,6R.
+    bars = bars_from(highs=[104, 111], lows=[101, 104])
+    bars.iloc[0, bars.columns.get_loc("Open")] = 102.0
+    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3)
+    assert result["status"] == "TARGET1"
+    assert result["r_multiple"] == pytest.approx(1.6)
+
+
+def test_gap_below_stop_fills_at_the_open():
+    # Eroeffnung bei 92 unter dem Stop von 95: Ausgang zu 92, also -1,6R.
+    bars = bars_from(highs=[101, 93], lows=[99, 91])
+    bars.iloc[1, bars.columns.get_loc("Open")] = 92.0
+    result = outcomes.evaluate(ENTRY_PICK, bars, trigger_window=3)
+    assert result["status"] == "STOP"
+    assert result["r_multiple"] == pytest.approx(-1.6)
 
 
 def test_same_day_stop_and_target_counts_as_stop():

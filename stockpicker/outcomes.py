@@ -12,7 +12,7 @@ from stockpicker.config import TRADE
 #: Ausgaenge, die als Trade in Trefferquote und Erwartungswert eingehen.
 #:
 #: TIME_STOP gehoert dazu, und daran haengt mehr als ein Statuswert: der Stop
-#: liegt rund 1,5 ATR vom Entry entfernt, Target 1 rund 3 ATR. Im Fenster von
+#: liegt rund 2 ATR vom Entry entfernt, Target 1 rund 3 ATR. Im Fenster von
 #: ``hold_days_max`` loest der Stop deshalb viel haeufiger auf als das Ziel.
 #: Zaehlte nur, was einen der beiden Punkte beruehrt hat, fielen die zaehen
 #: Gewinner als "noch offen" aus der Rechnung und die Bilanz zeigte
@@ -33,8 +33,10 @@ def evaluate(pick: dict, bars: pd.DataFrame, trigger_window: int = 3, *,
     """Bestimmt den Ausgang eines Picks.
 
     Ablauf: Der Trade gilt als eroeffnet, sobald das Hoch innerhalb der ersten
-    `trigger_window` Bars den Entry erreicht. Danach entscheidet, ob zuerst der
-    Stop oder Target 1 beruehrt wird. Beruehrt eine einzelne Bar beides, zaehlt
+    `trigger_window` Bars den Entry erreicht -- gefuellt zum Entry oder, nach
+    einer Luecke nach oben, zum hoeheren Eroeffnungskurs. Danach entscheidet,
+    ob zuerst der Stop oder Target 1 beruehrt wird; ueberspringt eine Luecke
+    einen der beiden, zaehlt der Eroeffnungskurs. Beruehrt eine einzelne Bar beides, zaehlt
     konservativ der Stop — aus Tagesdaten laesst sich die Reihenfolge nicht
     rekonstruieren.
 
@@ -79,18 +81,28 @@ def evaluate(pick: dict, bars: pd.DataFrame, trigger_window: int = 3, *,
 
     base["triggered_on"] = bar_date(bars, trigger_index)
 
+    # Eine Stop-Buy-Order fuellt bei einer Eroeffnung ueber dem Entry zum
+    # Eroeffnungskurs, nicht zum Entry. Ebenso fuellen Stop und Ziel nach
+    # einer Kursluecke zum Eroeffnungskurs. Das R bleibt am geplanten Risiko
+    # (Entry minus Stop) gemessen -- sonst waere ein Gap-Verlust kleiner als
+    # ein gewoehnlicher Stop.
+    fill = max(entry, float(bars["Open"].iloc[trigger_index]))
+
     for i in range(trigger_index, len(bars)):
+        bar_open = float(bars["Open"].iloc[i])
         hit_stop = bars["Low"].iloc[i] <= stop
         hit_target = bars["High"].iloc[i] >= target1
         if hit_stop:
-            return {**base, "status": "STOP", "r_multiple": -1.0,
-                    "closed_on": bar_date(bars, i)}
+            exit_price = min(stop, bar_open) if i > trigger_index else stop
+            return {**base, "status": "STOP", "closed_on": bar_date(bars, i),
+                    "r_multiple": round((exit_price - fill) / risk, 2)}
         if hit_target:
+            exit_price = max(target1, bar_open) if i > trigger_index else target1
             return {**base, "status": "TARGET1", "closed_on": bar_date(bars, i),
-                    "r_multiple": round((target1 - entry) / risk, 2)}
+                    "r_multiple": round((exit_price - fill) / risk, 2)}
 
     last_close = float(bars["Close"].iloc[-1])
-    r_multiple = round((last_close - entry) / risk, 2)
+    r_multiple = round((last_close - fill) / risk, 2)
     if window_expired(pick.get("date"), hold_days, as_of):
         return {**base, "status": "TIME_STOP", "r_multiple": r_multiple,
                 "closed_on": bar_date(bars, len(bars) - 1)}

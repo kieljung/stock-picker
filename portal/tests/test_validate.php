@@ -41,7 +41,7 @@ $errors = validate_report(good_doc(['picks' => [good_pick(['stop' => 43.5])]]));
 assert_that(str_contains(implode(' ', $errors), 'Stop'), 'Stop ueber Entry wird abgelehnt');
 
 $errors = validate_report(good_doc(['picks' => [good_pick(['target1' => 45.0])]]));
-assert_that(str_contains(implode(' ', $errors), 'R:R'), 'R:R unter 2 wird abgelehnt');
+assert_that(str_contains(implode(' ', $errors), 'R:R'), 'R:R unter 1,5 wird abgelehnt');
 
 $errors = validate_report(good_doc(['picks' => [good_pick(['composite' => 55])]]));
 assert_that(str_contains(implode(' ', $errors), 'Composite'), 'Composite unter 60 wird abgelehnt');

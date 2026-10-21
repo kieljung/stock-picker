@@ -14,7 +14,9 @@ expliziten Einstiegs-, Stop- und Zielniveaus sowie Invalidierungskriterien.
 **Konfiguration**
 
 - Kontorisiko pro Trade: 1 %
-- Mindest-Chance-Risiko-Verhältnis: 2:1
+- Mindest-Chance-Risiko-Verhältnis: 1,5:1
+- Stop: mindestens 2 ATR unter dem Entry
+- Target 1: rund 3 ATR über dem Entry — ein Ziel, das im Haltefenster erreichbar ist, nicht das Maximum der Story
 - Haltedauer: 2–10 Handelstage
 - Richtung: ausschließlich Long
 
@@ -189,8 +191,11 @@ Jede Quelle mit Datum und Link.
 
 Beginne bei 5 Punkten und rechne:
 
-- R:R zum ersten Target ≥ 3:1 → +2 · ≥ 2:1 → +1 · unter 2:1 → Kandidat streichen
-- Stopweite ≥ 1,5 ATR → +1 · unter 1,0 ATR → −2 (Rauschen holt den Stop ab)
+- R:R zum ersten Target unter 1,5:1 → Kandidat streichen. Ein höheres R:R gibt
+  keine Punkte: es entsteht fast immer durch ein zu fernes Ziel oder einen zu
+  engen Stop, und beides kostet im Haltefenster mehr, als es bringt.
+- Stopweite ≥ 2 ATR → +1 · unter 1,5 ATR → −2 (Rauschen holt den Stop ab)
+- Target 1 weiter als 3,5 ATR vom Entry → −1 (im Haltefenster kaum erreichbar)
 - `dollar_volume` > 25 Mio USD → +1 · unter 8 Mio → −1
 - `short_percent_of_float` > 0,20 → +1 (Squeeze-Potenzial) · > 0,40 → −1 (Bilanzrisiko)
 - Earnings innerhalb der geplanten Haltedauer → −3
@@ -229,18 +234,18 @@ Feldern und werden im Portal gerendert — Absätze mit `\n\n`, Links als
         "risk": "Eine Zeile zum Risiko-Score."
       },
       "entry": 42.80,
-      "stop": 40.10,
+      "stop": 39.20,
       "target1": 48.20,
       "target2": 52.00,
-      "risk_reward": 2.0,
-      "position_size": 37,
+      "risk_reward": 1.5,
+      "position_size": 27,
       "catalyst": "FDA-Zulassung 2026-08-06",
       "thesis": "Zwei Sätze: was passiert hier, und warum ist jetzt der Moment.",
       "technicals": "Template, Kursstruktur, Screener-Zahlen im Fließtext. Nenne konkret, welche Kriterien erfüllt sind und welche nicht.",
       "catalyst_detail": "Was, wann, welche Quelle. Einschätzung, wie viel davon der Kurs schon verarbeitet hat.",
       "plan": {
         "entry": "über 42,80 bei RVOL > 1,5",
-        "stop": "40,10 — 1,46 ATR unter Entry, unter dem Basistief",
+        "stop": "39,20 — 2,0 ATR unter Entry, unter dem Basistief",
         "target1": "48,20 — Messziel der Basis auf den Pivot addiert",
         "target2": "52,00 — Ausdehnung, falls der Ausbruch trägt"
       },
@@ -293,7 +298,7 @@ aus, je Punkt ein String:
 - [ ] Jede Zahl trägt „Screener“ oder eine Quelle mit Link
 - [ ] Kein Titel unter Composite 60 unter den Picks
 - [ ] Kein Sektor mit mehr als zwei Titeln
-- [ ] Jedes R:R zu Target 1 mindestens 2:1
+- [ ] Jedes R:R zu Target 1 mindestens 1,5:1, jeder Stop mindestens 2 ATR unter dem Entry
 - [ ] Jeder Stop liegt unter dem Entry, jedes Target darüber, Target 2 über Target 1
 - [ ] Jeder Entry liegt innerhalb von 15 % um den Screener-Schlusskurs
 - [ ] Jeder Titel hat Bear-Case und Invalidierung

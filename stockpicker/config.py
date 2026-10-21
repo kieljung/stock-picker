@@ -33,8 +33,11 @@ class ScreenConfig:
 @dataclass(frozen=True)
 class TradeConfig:
     account_risk_pct: float = 1.0
-    min_risk_reward: float = 2.0
-    min_stop_atr: float = 1.5
+    # Stop >= 2 ATR, Target 1 bei rund 3 ATR, also R:R ab 1,5. Die Auswertung
+    # Aug-Okt 2026 zeigte: mit 1,5 ATR holte das Tagesrauschen 40 % der Trades
+    # ab, Ziele jenseits von 2R erreichten nur 11 % im Haltefenster.
+    min_risk_reward: float = 1.5
+    min_stop_atr: float = 2.0
     hold_days_min: int = 2
     hold_days_max: int = 10
     min_composite_score: int = 60
